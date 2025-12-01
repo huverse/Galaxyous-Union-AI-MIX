@@ -1,0 +1,5 @@
+{
+  "name": "Galaxyous Union AI MIX",
+  "description": "An immersive chat environment where multiple AI models (Gemini, ChatGPT, DeepSeek, Doubao) participate in a shared conversation, mimicking a real-life gathering.",
+  "requestFramePermissions": []
+}

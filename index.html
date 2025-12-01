@@ -1,0 +1,169 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Galaxyous Union AI MIX</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        darkMode: 'media', // Uses system preference
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['"Inter"', '"Noto Sans SC"', 'sans-serif'],
+            },
+            colors: {
+              apple: {
+                dark: '#000000',
+                gray: '#1c1c1e',
+                light: '#f5f5f7'
+              }
+            },
+            animation: {
+              'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'fade-in': 'fadeIn 0.5s ease-out forwards',
+              'slide-up': 'slideUp 0.3s ease-out forwards',
+              'gradient-x': 'gradientX 3s ease infinite',
+            },
+            keyframes: {
+              fadeIn: {
+                '0%': { opacity: '0' },
+                '100%': { opacity: '1' },
+              },
+              slideUp: {
+                '0%': { transform: 'translateY(10px)', opacity: '0' },
+                '100%': { transform: 'translateY(0)', opacity: '1' },
+              },
+              gradientX: {
+                '0%, 100%': {
+                  'background-size': '200% 200%',
+                  'background-position': 'left center'
+                },
+                '50%': {
+                  'background-size': '200% 200%',
+                  'background-position': 'right center'
+                },
+              },
+            }
+          },
+        },
+      }
+    </script>
+    <style>
+      body {
+        background-color: #f5f5f7; /* Apple Light Gray */
+        color: #1d1d1f;
+        -webkit-tap-highlight-color: transparent;
+      }
+      
+      /* Apple-style Custom Scrollbar */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(0,0,0,0.2); 
+        border-radius: 10px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(0,0,0,0.4); 
+      }
+      
+      /* Global Responsive Rules */
+      * {
+        min-width: 0; 
+        box-sizing: border-box;
+      }
+      
+      .markdown-body {
+        overflow-wrap: anywhere;
+        word-wrap: break-word;
+        word-break: break-word;
+        max-width: 100%;
+        line-height: 1.6;
+      }
+
+      .markdown-body img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 0.5rem;
+      }
+
+      .markdown-body pre {
+        background-color: #1e293b;
+        color: #e2e8f0;
+        padding: 1rem;
+        border-radius: 0.75rem;
+        overflow-x: auto;
+        margin-top: 0.5rem;
+        margin-bottom: 0.5rem;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      
+      .markdown-body code {
+        background-color: rgba(0,0,0,0.05);
+        padding: 0.125rem 0.25rem;
+        border-radius: 0.25rem;
+        font-family: monospace;
+        font-size: 0.9em;
+      }
+
+      .markdown-body table {
+        display: block;
+        width: 100%;
+        overflow-x: auto;
+        border-collapse: collapse;
+      }
+      .markdown-body th, .markdown-body td {
+        border: 1px solid #e5e5e5;
+        padding: 0.5rem;
+      }
+      
+      /* Dark Mode Overrides (Apple Style) */
+      @media (prefers-color-scheme: dark) {
+        body {
+          background-color: #000000; /* Pure Black for OLED */
+          color: #f5f5f7;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.2); 
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.4); 
+        }
+        .markdown-body code {
+           background-color: rgba(255,255,255,0.15);
+        }
+        .markdown-body th, .markdown-body td {
+           border-color: #333;
+        }
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0",
+    "react-markdown": "https://aistudiocdn.com/react-markdown@^10.1.0",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
