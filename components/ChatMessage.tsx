@@ -56,6 +56,7 @@ const replaceLatexWithUnicode = (text: string): string => {
 const parseMessageContent = (text: string): Token[] => {
   const tokens: Token[] = [];
   
+  // Handle Code Blocks first
   const codeBlockSplit = text.split(/(```[\s\S]*?```)/g);
   
   codeBlockSplit.forEach((segment, index) => {
@@ -65,7 +66,7 @@ const parseMessageContent = (text: string): Token[] => {
           return;
       }
 
-      // Check for Logic Mode tags
+      // Check for Logic Mode tags (Stem Mode)
       if (segment.includes('[[THOUGHT]]') || segment.includes('[[RESULT]]')) {
           const logicSplit = segment.split(/(\[\[THOUGHT\]\][\s\S]*?\[\[\/THOUGHT\]\])|(\[\[RESULT\]\][\s\S]*?\[\[\/RESULT\]\])/g);
           
@@ -82,64 +83,69 @@ const parseMessageContent = (text: string): Token[] => {
           return;
       }
       
-      // Robust Social Mode JSON Detection
-      // We look for a JSON object structure that contains specific keys like "Virtual Timeline Time" or "Language"
-      // This is safer than a strict regex on the order of keys.
+      // Robust Unified JSON Detection
+      // Detection strategy: Look for outermost curly braces that contain at least one known key
       let remaining = segment;
       
-      // Find potential JSON blocks: starts with { and ends with }
-      // This regex attempts to find the largest outer braces block
+      // Attempt to find potential JSON objects (non-nested for simplicity, or greedy match)
       const jsonCandidateRegex = /(\{[\s\S]*?\})/g;
+      
+      // Split by potential JSON objects
+      // Note: This regex is simple; complex nested JSONs might need a better parser, but for this app structure it's sufficient.
       const parts = remaining.split(jsonCandidateRegex);
       
       parts.forEach(part => {
          if (!part.trim()) return;
          
          if (jsonCandidateRegex.test(part)) {
-             // Potential JSON
-             let isSocial = false;
+             // Potential JSON found
+             let isUnifiedJson = false;
              let metadata: any = {};
              
-             // Try Parsing
-             try {
-                // Pre-process: sometimes models output newlines in strings which is invalid JSON, 
-                // but we can try to leniently parse it or use a heuristic.
-                // Simple heuristic: check for keys
-                if (
-                    part.includes("Virtual Timeline Time") || 
-                    part.includes("Psychological State") ||
-                    part.includes("Specific Actions") ||
-                    part.includes("Language")
-                ) {
-                    isSocial = true;
-                    // Manual extraction to handle lenient formatting
+             // Check against known keys to distinguish from random JSON code snippets
+             if (
+                part.includes("Virtual Timeline Time") || 
+                part.includes("Psychological State") ||
+                part.includes("Specific Actions") ||
+                part.includes("Language")
+             ) {
+                isUnifiedJson = true;
+                
+                // Manual loose parsing to handle potential deviations
+                try {
                     const inner = part.slice(1, -1);
-                    const lines = inner.split('\n');
-                    lines.forEach(line => {
-                        const colonIdx = line.indexOf(':');
-                        if (colonIdx > -1) {
-                            // Extract key, remove quotes
-                            const key = line.slice(0, colonIdx).trim().replace(/^['"]|['"]$/g, '');
-                            // Extract value, remove trailing comma, remove quotes
-                            let val = line.slice(colonIdx + 1).trim();
-                            if (val.endsWith(',')) val = val.slice(0, -1);
-                            if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-                            metadata[key] = val;
-                        }
-                    });
+                    // We split by lines to handle the specific format requested, though JSON.parse is preferred if valid.
+                    // First try native parse
+                    try {
+                        metadata = JSON.parse(part);
+                    } catch (e) {
+                        // Fallback: manual line parsing (handling escaped quotes is hard here, but let's try basic)
+                        const lines = inner.split('\n');
+                        lines.forEach(line => {
+                            const colonIdx = line.indexOf(':');
+                            if (colonIdx > -1) {
+                                const key = line.slice(0, colonIdx).trim().replace(/^['"]|['"]$/g, '');
+                                let val = line.slice(colonIdx + 1).trim();
+                                if (val.endsWith(',')) val = val.slice(0, -1);
+                                if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+                                metadata[key] = val;
+                            }
+                        });
+                    }
+                } catch (e) {
+                    console.error("Failed to parse social block", e);
                 }
-             } catch (e) {
-                 // ignore
              }
 
-             if (isSocial) {
+             if (isUnifiedJson) {
                  tokens.push({ type: 'social_block', content: '', metadata });
              } else {
-                 // Treat as Whisper if it's a simple object and not social
+                 // Treat as legacy Whisper if it's a simple object, otherwise just text
+                 // Legacy Whisper was { content }
                  tokens.push({ type: 'whisper', content: part.slice(1, -1) });
              }
          } else {
-             // Regular text processing (Thought, Action, Whisper fallback)
+             // Regular text processing (Legacy support: Thought, Action, Whisper fallback)
              const subRegex = /(\[.*?\])|(\{.*?\})|((?<!https?:)\/\/.*?\/\/)/s;
              const subParts = part.split(subRegex).filter(p => p !== undefined && p !== '');
              
@@ -344,7 +350,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
              ) : (
                tokens.map((token, index) => {
                  if (token.type === 'social_block') {
-                    // --- SOCIAL MODE CARD ---
+                    // --- SOCIAL MODE CARD (NOW UNIFIED FORMAT) ---
                     const m = token.metadata || {};
                     return (
                         <div key={index} className="bg-white dark:bg-[#151516] border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xl w-full max-w-lg mb-2 relative overflow-hidden group/card hover:shadow-2xl transition-all">
@@ -442,6 +448,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                      </div>
                    );
                  } else if (token.type === 'thought') {
+                   // Legacy Thought
                    return (
                      <div key={index} className="relative max-w-full bg-slate-100 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs md:text-sm px-3 py-2 md:px-4 md:py-2 rounded-2xl italic flex items-start gap-2 backdrop-blur-sm">
                        <BrainCircuit size={14} className="mt-1 shrink-0 opacity-70" />
@@ -451,6 +458,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                      </div>
                    );
                  } else if (token.type === 'whisper') {
+                   // Legacy Whisper
                    return (
                      <div key={index} className="relative max-w-full bg-purple-50 dark:bg-purple-900/10 border border-purple-200 dark:border-purple-800/30 text-purple-800 dark:text-purple-300 text-xs md:text-sm px-3 py-2 md:px-4 md:py-2 rounded-2xl flex items-start gap-2 shadow-inner">
                        <Lock size={14} className="mt-1 shrink-0 opacity-70" />
@@ -463,6 +471,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                      </div>
                    );
                  } else if (token.type === 'action') {
+                   // Legacy Action
                    return (
                      <div key={index} className="inline-flex items-center gap-2 text-amber-600 dark:text-amber-400 text-xs md:text-sm font-bold italic px-2 py-1 max-w-full overflow-hidden">
                        <Clapperboard size={14} className="shrink-0" />

@@ -59,14 +59,19 @@ export interface Session {
   // Independent State per Session
   isProcessing: boolean;
   currentTurnParticipantId: string | null;
-  
-  // Control State
   isAutoPlayStopped?: boolean; // Prevents auto-drive from resuming after stop
+
+  // Independent Mode Flags (Previously Global ChatState)
+  isDeepThinking: boolean; 
+  isHumanMode: boolean; 
+  isLogicMode: boolean; 
+  isSocialMode: boolean; 
 }
 
+// Deprecated: ChatState is now merged into Session
 export interface ChatState {
-  isDeepThinking: boolean; // Global toggle
-  isHumanMode: boolean; // Real Human Mode toggle
-  isLogicMode: boolean; // Logic/STEM Mode toggle
-  isSocialMode: boolean; // Fully Human Social Mode toggle
+  isDeepThinking: boolean; 
+  isHumanMode: boolean; 
+  isLogicMode: boolean; 
+  isSocialMode: boolean; 
 }

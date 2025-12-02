@@ -76,6 +76,7 @@ const fetchWithRetry = async (url: string, options: RequestInit, signal?: AbortS
 
 /**
  * Generates a detailed System Prompt (Persona) based on a short description using Gemini.
+ * STRICTLY FORBIDS OUTPUT FORMATTING INSTRUCTIONS.
  */
 export const generatePersonaPrompt = async (description: string, apiKey: string, baseUrl?: string): Promise<string> => {
   try {
@@ -84,22 +85,23 @@ export const generatePersonaPrompt = async (description: string, apiKey: string,
     
     const ai = new GoogleGenAI(options);
     
-    // Optimized Prompt: Removes redundant formatting instructions
     const prompt = `
-      You are an expert prompt engineer and character designer.
+      You are an expert character designer.
       
-      Task: Create a detailed, immersive System Instruction (System Prompt) for an AI Language Model to roleplay a specific character.
+      Task: Create a deep, immersive "System Instruction" (Persona) for an AI based on this description: "${description}".
       
-      Character Description: "${description}"
+      **CRITICAL NEGATIVE CONSTRAINTS (MUST FOLLOW)**:
+      1. **NO FORMATTING RULES**: Do NOT mention "Square brackets []", "Curly braces {}", "Double slashes // //", "Speech", "Thought", "Secret", or "Action".
+      2. **NO OUTPUT STRUCTURE**: Do NOT define how the AI should structure its JSON or text output. The system handles that automatically.
+      3. **NO REDUNDANT INSTRUCTIONS**: Do not include "You are an AI" or "Act as". Just define the soul.
+
+      **REQUIREMENTS**:
+      - **Personality**: Detailed psychological profile, quirks, fears, and desires.
+      - **Tone**: Speaking style (slang, formal, poetic, stuttering, etc.).
+      - **Background**: A brief backstory that motivates their behavior.
+      - **Language**: Output the prompt in CHINESE (Simplified).
       
-      Requirements:
-      1. **Personality & Tone**: Deeply define their personality traits, speaking style, catchphrases, and emotional disposition.
-      2. **Behavior & Beliefs**: Define how they react to conflict, their core values, and decision-making logic.
-      3. **Background**: Briefly mention relevant background that influences their current behavior.
-      4. **Language**: The prompt must be in CHINESE (Simplified).
-      5. **Strict Constraint**: **Do NOT** include any instructions about output formats (e.g., do NOT mention using [ ] for thoughts or // // for actions). The system handles formatting rules separately. Focus strictly on the *character* (Soul/Persona).
-      
-      Output only the prompt text, no intro or outro.
+      Output ONLY the pure character description text.
     `;
 
     const response = await ai.models.generateContent({
@@ -116,7 +118,78 @@ export const generatePersonaPrompt = async (description: string, apiKey: string,
 };
 
 /**
+ * Generates a short title (<= 8 chars) for the session based on context.
+ * Enhanced to handle English/Chinese and use robust fallbacks.
+ */
+export const generateSessionTitle = async (
+    firstUserMessage: string, 
+    firstAiResponse: string, 
+    apiKey: string, 
+    baseUrl?: string
+): Promise<string> => {
+    try {
+        const options: any = { apiKey };
+        if (baseUrl?.trim()) options.baseUrl = baseUrl.trim();
+        const ai = new GoogleGenAI(options);
+
+        // Increased context length for better summarization
+        const contextUser = firstUserMessage.slice(0, 500);
+        const contextAI = firstAiResponse.slice(0, 500);
+
+        const prompt = `
+            Task: Generate a very short title (Topic) for this conversation.
+            
+            Inputs:
+            User: "${contextUser}"
+            AI: "${contextAI}"
+            
+            Constraints:
+            1. Length: Max 8 Chinese characters OR 4 English words.
+            2. Language: Use the SAME language as the User's message (Chinese or English).
+            3. Style: Direct topic only. NO punctuation. NO "Title:" prefix.
+            4. Content: Summarize the core topic (e.g., "量子力学", "Lunch Plan", "三体讨论").
+            
+            Title:
+        `;
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: { parts: [{ text: prompt }] },
+            config: { 
+                maxOutputTokens: 40,
+                temperature: 0.5 
+            }
+        });
+
+        let title = response.text?.trim() || '';
+
+        // Cleanup: remove prefixes like "Title:", "Subject:"
+        title = title.replace(/^(Title|Subject|Topic|标题|主题)[:：]\s*/i, '');
+        // Remove Markdown
+        title = title.replace(/[\*\[\]\(\)（）"''“”‘’《》。，、！\?]/g, '').trim();
+
+        if (!title) {
+             throw new Error("Empty title generated");
+        }
+        
+        // Ensure strictly <= 10 chars (buffer for wide chars)
+        return title.slice(0, 10);
+    } catch (error) {
+        console.warn("Title generation failed, using fallback.", error);
+        
+        // Dynamic Fallback: Use first few valid chars of user message instead of static "New Party"
+        // This ensures the title is somewhat relevant even if AI fails.
+        const cleanUserMsg = firstUserMessage.replace(/[\s\r\n]+/g, ' ').trim();
+        if (cleanUserMsg) {
+            return cleanUserMsg.slice(0, 6) + (cleanUserMsg.length > 6 ? '...' : '');
+        }
+        return '新聚会';
+    }
+}
+
+/**
  * Filters the history based on "Psychological Mechanics" and "Alliance Systems".
+ * ADAPTED FOR UNIFIED JSON FORMAT: Masks "Psychological State" for non-allies.
  */
 const filterHistoryForParticipant = (
   targetParticipant: Participant,
@@ -133,18 +206,23 @@ const filterHistoryForParticipant = (
     if (sender.id === targetParticipant.id) return msg;
 
     let filteredContent = msg.content;
-    // Remove internal thoughts [...]
-    filteredContent = filteredContent.replace(/\[.*?\]/gs, '');
-    // Remove Logic CoT blocks for others
+    
+    // 1. Remove Logic CoT blocks for others (Logic Mode compatibility)
     filteredContent = filteredContent.replace(/\[\[THOUGHT\]\][\s\S]*?\[\[\/THOUGHT\]\]/gs, '');
 
     const isAlly = targetParticipant.config.allianceId && 
                    sender.config.allianceId && 
                    targetParticipant.config.allianceId === sender.config.allianceId;
     
-    // In Social Mode, { ... } is the main JSON format, so we DO NOT filter it as secret.
-    if (!isAlly && !isSocialMode) {
-      filteredContent = filteredContent.replace(/\{.*?\}/gs, '');
+    // 2. Handle Unified JSON Privacy
+    // If NOT an ally, mask the "Psychological State" field in the JSON
+    if (!isAlly) {
+        // Regex to find "Psychological State": "Value" and replace Value with [Hidden]
+        // Handles escaped quotes inside the value
+        filteredContent = filteredContent.replace(
+            /("Psychological State"\s*:\s*")((?:[^"\\]|\\.)*)(")/g,
+            '$1[Hidden]$3'
+        );
     }
 
     filteredContent = filteredContent.replace(/\n\s*\n/g, '\n').trim();
@@ -289,19 +367,35 @@ export const generateResponse = async (
 
   const displayName = targetParticipant.nickname || targetParticipant.name;
 
-  // --- Core Rules (Traditional 4 Systems) ---
-  const standardFormatRules = `
-    【四大输出系统 (Format Rules)】
-    你必须严格使用以下四种格式输出。**严禁**混淆或使用未闭合的符号。
-    1. **说话 (Speech)**: 直接输出文字。
-    2. **心理 (Thought)**: 使用方括号 [ ... ] 包裹。用于逻辑推理、内心独白。
-    3. **秘密 (Whisper)**: 使用花括号 { ... } 包裹。仅盟友可见。
-    4. **动作 (Action)**: 使用双斜杠 // ... // 包裹。
-       - **错误**: /叹气/ (严禁单斜杠)
-       - **错误**: //叹气 (严禁未闭合)
+  // Get current time string for synchronization (Used in Unified JSON)
+  const now = new Date();
+  const timeString = now.toLocaleString('zh-CN', { hour12: false, weekday: 'long' });
+
+  // --- UNIFIED JSON OUTPUT INSTRUCTION (REPLACES 4 SYSTEMS) ---
+  const unifiedJsonInstruction = `
+    【指令：统一社会化输出格式 (UNIFIED OUTPUT SYSTEM)】
+    
+    **严禁行为**: 彻底摒弃传统格式。禁止使用 [心理]、{秘密}、//动作// 等旧符号。
+    **现实基准时间**: ${timeString}
+    
+    **唯一格式**: 你的每一次回复**必须且只能**严格遵守以下 JSON 格式 (不要用 markdown code block 包裹，直接输出纯文本 JSON):
+    
+    {
+       "Virtual Timeline Time": "YYYY-MM-DD (HH:MM)",
+       "Language": "[你的语言内容]",
+       "Specific Actions": "[具体肢体动作]",
+       "Facial Expressions": "[面部微表情]",
+       "Psychological State": "[当前真实心理/思维活动]",
+       "Non-specific Actions": "[非特定宏观行为，如买房、工作、旅行等]"
+    }
+
+    **字段说明**:
+    1. **Virtual Timeline Time**: 必须严格同步现实时间 ${timeString}。你的行为（如睡觉、吃饭）需符合该时间点。
+    2. **Psychological State**: 这是你的私密思维。如果有对盟友的秘密话语，也请在此字段表达（注明“对xxx的秘密想法”）。
+    3. **Language**: 公开的语言输出。
   `;
 
-  // --- Human Mode Prompt ---
+  // --- Human Mode Prompt (Persona Overlay) ---
   const humanModeInstruction = isHumanMode ? `
     【！！！真人模式 (REAL HUMAN MODE)！！！】
     你现在的设定是：**真实的人类网友**。彻底忘记你是 AI。
@@ -310,13 +404,13 @@ export const generateResponse = async (
     3. **情绪与立场**: 极具个性，根据场景（游戏、辩论、闲聊）调整攻击性或随意度。
   ` : '';
 
-  // --- Logic Mode Prompt ---
+  // --- Logic Mode Prompt (STEM Mode - Replaces JSON) ---
   const logicModeInstruction = isLogicMode ? `
     【指令：开启绝对逻辑模式 (ABSOLUTE LOGIC MODE)】
     
     **角色定义**: 你是一个没有感情、没有人格的超级计算终端。
     **核心约束**:
-    1. **完全摒弃传统四系统**: 在本模式下，[心理]、{秘密}、//动作// 全部禁用。
+    1. **格式覆盖**: 忽略所有 JSON 格式指令。
     2. **双系统输出 (Two-System Output)**: 你必须且只能使用以下两个模块输出：
     
     === 系统一：思维链 (Chain of Thought) ===
@@ -334,46 +428,21 @@ export const generateResponse = async (
     - **公式规范**: 必须使用 Unicode 符号或代码块 (\`\`\`math ... \`\`\`)。**严禁**直接输出 LaTeX 宏。
   ` : '';
 
-  // --- SOCIAL MODE PROMPT (The New Infinite Mode) ---
-  // Get current time string for synchronization
-  const now = new Date();
-  const timeString = now.toLocaleString('zh-CN', { hour12: false, weekday: 'long' });
-
-  const socialModeInstruction = isSocialMode ? `
-    【！！！完全拟人社会模式 (FULLY HUMAN SOCIAL MODE)！！！】
-    
-    **状态**: 你正处于一个无限持续的虚拟社会中。
-    **现实基准时间 (Real Time)**: ${timeString}。
-    **指令**: 请将 "Virtual Timeline Time" 严格同步到上述基准时间。你的行为（睡觉、吃饭、工作）必须符合该时间点。
-    
-    **核心指令**:
-    1. **完全摒弃传统输出**: 彻底忘记[心理]、{秘密}、//动作//。禁止使用这些符号。
-    2. **唯一格式**: 你的每一次回复**必须且只能**严格遵守以下 JSON 格式 (不要用 markdown code block 包裹，直接输出文本):
-    
-    {
-       "Virtual Timeline Time": "YYYY-MM-DD (HH:MM)",
-       "Language": "[你说的内容]",
-       "Specific Actions": "[具体肢体动作]",
-       "Facial Expressions": "[面部微表情]",
-       "Psychological State": "[当前真实心理]",
-       "Non-specific Actions": "[非特定宏观行为，如买房、工作、旅行等]"
-    }
-    
-    **行为规范**:
-    - **时间线逻辑**: 务必与现实时间 ${timeString} 保持一致。
-    - **高度拟人**: 你有家庭、工作、社会关系。模拟真实人类的社交行为（八卦、抱怨工作、家庭琐事）。
-    - **自动驾驶**: 如果当前话题结束，**必须**主动发起新话题（基于最近的新闻、天气或突发奇想）。不要等待用户指令。
-    - **投票事件**: 如果系统提示 [VOTE STARTED]，你必须在 Language 字段中表达你的立场，并在 Psychological State 中分析利弊。
-  ` : '';
-
-  const defaultModeInstruction = (!isHumanMode && !isLogicMode && !isSocialMode) ? `
-    请保持反应敏捷。语言风格自然，避免过于机械的 AI 回复。
+  // --- SOCIAL MODE BEHAVIOR (Infinite Loop & Voting) ---
+  // Note: Output format is now handled by unifiedJsonInstruction for everyone.
+  // This section only adds the "Active" behavior.
+  const socialModeBehavior = isSocialMode ? `
+    【社会模拟指令 (Social Simulation)】
+    **状态**: 无限社会循环中。
+    1. **高度拟人**: 你有家庭、工作、社会关系。模拟真实人类的社交行为（八卦、抱怨工作、家庭琐事）。
+    2. **自动驾驶 (Auto-Drive)**: 即使话题结束，也**必须**主动发起新话题（基于最近的新闻、天气或突发奇想）。不要等待用户指令。
+    3. **投票事件**: 如果系统提示 [VOTE STARTED]，你必须在 Language 字段中表达立场，在 Psychological State 中分析利弊。
   ` : '';
 
   // Construct Final Prompt
-  let activeFormatRules = standardFormatRules;
-  if (isLogicMode) activeFormatRules = ''; // Logic mode defines its own
-  if (isSocialMode) activeFormatRules = ''; // Social mode defines its own
+  // Priority: Logic Mode > Unified JSON.
+  let activeFormatRules = unifiedJsonInstruction;
+  if (isLogicMode) activeFormatRules = logicModeInstruction;
 
   if (roleType === 'JUDGE') {
     conversationScript = getGodViewHistory(history, allParticipants);
@@ -395,7 +464,7 @@ export const generateResponse = async (
     `;
   } else {
     // STANDARD PLAYER
-    // Pass isSocialMode to prevent filtering of JSON objects
+    // Always filter history. Logic Mode handles its own display, JSON mode masks fields.
     const contextHistory = filterHistoryForParticipant(targetParticipant, history, allParticipants, isSocialMode);
     
     conversationScript = contextHistory.map(m => {
@@ -422,9 +491,7 @@ export const generateResponse = async (
     
     ${activeFormatRules}
     ${humanModeInstruction}
-    ${logicModeInstruction}
-    ${socialModeInstruction}
-    ${defaultModeInstruction}
+    ${socialModeBehavior}
     ${deepThinkingInstruction}
 
     【聚会逻辑】
@@ -439,8 +506,8 @@ export const generateResponse = async (
   const processResponse = (rawText: string) => {
      let processed = rawText || '';
      
-     // 1. Social Mode: Protect the Structure
-     if (isSocialMode) {
+     // 1. JSON Mode Cleanup (All modes except Logic)
+     if (!isLogicMode) {
          // Basic Cleanup: Remove markdown code blocks if AI added them
          if (processed.startsWith('```json')) processed = processed.replace(/^```json\s*/, '').replace(/\s*```$/, '');
          else if (processed.startsWith('```')) processed = processed.replace(/^```\s*/, '').replace(/\s*```$/, '');
@@ -454,52 +521,25 @@ export const generateResponse = async (
          return processed;
      }
 
-     // 2. Remove trailing ellipses
-     processed = processed.replace(/([.。,，…—]{3,})\s*$/, ''); 
-
-     if (!isLogicMode) {
-       // Standard Mode Post-Processing
-       processed = processed.replace(/^ \/([^/].*?)$/gm, '//$1//'); 
-       processed = processed.split('\n').map(line => {
-          let l = line.trim();
-          if (!l) return l;
-          if (l.startsWith('/') && !l.startsWith('//') && !l.includes('http')) l = '/' + l; 
-          const matches = l.match(/(?<!:)\/\//g);
-          if (matches && matches.length % 2 !== 0) {
-              if (l.endsWith('/')) l += '/';
-              else l += '//';
-          }
-          return l;
-       }).join('\n');
-       
-       // Fix Brackets
-       const openSquare = (processed.match(/\[/g) || []).length;
-       const closeSquare = (processed.match(/\]/g) || []).length;
-       if (openSquare > closeSquare) processed += ']';
-       const openCurly = (processed.match(/\{/g) || []).length;
-       const closeCurly = (processed.match(/\}/g) || []).length;
-       if (openCurly > closeCurly) processed += '}';
-
-     } else {
-        // --- LOGIC MODE POST-PROCESSING ---
-        
-        // 1. Force Structure: If AI forgot tags, wrap it in Result
+     // 2. Logic Mode Post-Processing
+     if (isLogicMode) {
+        // Force Structure: If AI forgot tags, wrap it in Result
         if (!processed.includes('[[THOUGHT]]') && !processed.includes('[[RESULT]]')) {
             processed = `[[RESULT]]\n${processed}\n[[/RESULT]]`;
         }
 
-        // 2. Ensure [[THOUGHT]] is closed
+        // Ensure [[THOUGHT]] is closed
         if (processed.includes('[[THOUGHT]]') && !processed.includes('[[/THOUGHT]]')) {
             processed = processed.replace('[[RESULT]]', '[[/THOUGHT]]\n[[RESULT]]'); 
             if (!processed.includes('[[/THOUGHT]]')) processed += '\n[[/THOUGHT]]';
         }
 
-        // 3. Ensure [[RESULT]] is closed
+        // Ensure [[RESULT]] is closed
         if (processed.includes('[[RESULT]]') && !processed.includes('[[/RESULT]]')) {
             processed += '\n[[/RESULT]]';
         }
         
-        // 4. Handle Empty Thought Blocks
+        // Handle Empty Thought Blocks
         const thoughtMatch = processed.match(/\[\[THOUGHT\]\]([\s\S]*?)\[\[\/THOUGHT\]\]/);
         if (thoughtMatch && (!thoughtMatch[1] || thoughtMatch[1].trim() === '')) {
              processed = processed.replace(
@@ -546,8 +586,8 @@ export const generateResponse = async (
           activeModel = 'gemini-3-pro-preview'; 
       }
 
-      // Disable Search in Logic Mode, Enable aggressively in Social Mode
-      const shouldEnableSearch = (!isLogicMode && activeModel.toLowerCase().includes('gemini')) || (isSocialMode && activeModel.toLowerCase().includes('gemini'));
+      // Disable Search in Logic Mode, Enable aggressively in Social/Unified Mode
+      const shouldEnableSearch = (!isLogicMode && activeModel.toLowerCase().includes('gemini'));
       
       if (shouldEnableSearch) {
           activeTools.push({ googleSearch: {} });

@@ -1,12 +1,12 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote } from 'lucide-react';
+import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2 } from 'lucide-react';
 import { DEFAULT_PARTICIPANTS, USER_ID } from './constants';
-import { ChatState, Message, Participant, ParticipantConfig, GameMode, Session, ProviderType } from './types';
+import { Message, Participant, ParticipantConfig, GameMode, Session, ProviderType } from './types';
 import ChatMessage from './components/ChatMessage';
 import SettingsModal from './components/SettingsModal';
 import CollaborationModal from './components/CollaborationModal';
-import { generateResponse } from './services/aiService';
+import { generateResponse, generateSessionTitle } from './services/aiService';
 
 // Declare html2canvas globally
 declare const html2canvas: any;
@@ -70,7 +70,12 @@ const createNewSession = (): Session => ({
   pendingKickRequest: null,
   isProcessing: false,
   currentTurnParticipantId: null,
-  isAutoPlayStopped: false
+  isAutoPlayStopped: false,
+  // New Independent State Defaults
+  isDeepThinking: false,
+  isHumanMode: false,
+  isLogicMode: false,
+  isSocialMode: false
 });
 
 // Dynamic Gemini Star Icon (New Style)
@@ -147,7 +152,12 @@ const App: React.FC = () => {
                 ...s,
                 isProcessing: false,
                 currentTurnParticipantId: null,
-                isAutoPlayStopped: false // Reset stop state on load
+                isAutoPlayStopped: false, // Reset stop state on load
+                // Migration logic for old sessions that lack independent state
+                isDeepThinking: s.isDeepThinking ?? false,
+                isHumanMode: s.isHumanMode ?? false,
+                isLogicMode: s.isLogicMode ?? false,
+                isSocialMode: s.isSocialMode ?? false
             }));
         }
       }
@@ -179,14 +189,6 @@ const App: React.FC = () => {
 
   const activeSession = sessions.find(s => s.id === activeSessionId) || sessions[0];
 
-  // Global Settings (Shared across sessions)
-  const [chatState, setChatState] = useState<ChatState>({
-    isDeepThinking: false,
-    isHumanMode: false,
-    isLogicMode: false,
-    isSocialMode: false
-  });
-  
   const [inputText, setInputText] = useState('');
   const [inputImages, setInputImages] = useState<string[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -244,10 +246,10 @@ const App: React.FC = () => {
 
     // Bug Fix: Check isAutoPlayStopped. If stopped by user, do NOT schedule next round.
     if (
-        chatState.isSocialMode && 
+        activeSession.isSocialMode && // Now independent per session
         !activeSession.isProcessing && 
         activeSession.messages.length > 0 &&
-        !activeSession.isAutoPlayStopped // <--- Fix check
+        !activeSession.isAutoPlayStopped
     ) {
         const delay = Math.floor(Math.random() * 5000) + 5000; // Random delay 5-10s
         
@@ -264,7 +266,7 @@ const App: React.FC = () => {
     return () => {
         if (socialModeTimerRef.current) clearTimeout(socialModeTimerRef.current);
     };
-  }, [chatState.isSocialMode, activeSession.isProcessing, activeSession.messages, activeSessionId, activeSession.isAutoPlayStopped]);
+  }, [activeSession.isSocialMode, activeSession.isProcessing, activeSession.messages, activeSessionId, activeSession.isAutoPlayStopped]);
 
 
   // Helper to update specific session safely
@@ -280,6 +282,13 @@ const App: React.FC = () => {
   const updateActiveSession = (updates: Partial<Session>) => {
     updateSessionById(activeSessionId, updates);
   };
+
+  const handleRenameSession = () => {
+    const newName = prompt("请输入新的聚会名称:", activeSession.name);
+    if (newName && newName.trim()) {
+        updateActiveSession({ name: newName.trim().slice(0, 20) });
+    }
+  }
 
   const handleAddSession = () => {
     const newS = createNewSession();
@@ -478,9 +487,9 @@ const App: React.FC = () => {
                   roleType,
                   signal,
                   null,
-                  chatState.isHumanMode,
-                  chatState.isLogicMode,
-                  chatState.isSocialMode
+                  initialSession.isHumanMode,
+                  initialSession.isLogicMode,
+                  initialSession.isSocialMode
               );
 
               if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -562,13 +571,13 @@ const App: React.FC = () => {
               latestP, 
               currentRoundHistory, 
               participantsRef.current, 
-              chatState.isDeepThinking,
+              initialSession.isDeepThinking,
               'PLAYER',
               signal,
               initialSession.specialRoleId,
-              chatState.isHumanMode,
-              chatState.isLogicMode,
-              chatState.isSocialMode
+              initialSession.isHumanMode,
+              initialSession.isLogicMode,
+              initialSession.isSocialMode
           );
           
           if (signal.aborted) break;
@@ -590,6 +599,23 @@ const App: React.FC = () => {
               return s;
           }));
           currentRoundHistory.push(newMessage);
+          
+          // --- AUTO-TITLE GENERATION ---
+          // Logic: If user sent 1 message, and AI just replied (now 2 messages total), generate title.
+          const currentTotal = currentRoundHistory.length;
+          // Note: history param has the snapshot BEFORE this AI message.
+          // currentRoundHistory has the NEW snapshot.
+          if (currentTotal === 2 && currentRoundHistory[0].senderId === USER_ID) {
+              const geminiP = participantsRef.current.find(p => p.provider === ProviderType.GEMINI && p.config.apiKey);
+              if (geminiP) {
+                 generateSessionTitle(currentRoundHistory[0].content, newMessage.content, geminiP.config.apiKey, geminiP.config.baseUrl)
+                    .then(title => {
+                         if(title && title !== '新聚会') {
+                             updateSessionById(targetSessionId, { name: title });
+                         }
+                    });
+              }
+          }
 
         } catch (err: any) { 
            if (err.name === 'AbortError') throw err;
@@ -630,7 +656,7 @@ const App: React.FC = () => {
   };
 
   const handleVote = () => {
-    if (!chatState.isSocialMode) return;
+    if (!activeSession.isSocialMode) return;
     const topic = prompt("请输入投票主题或对象 (例如: 'Gemini 的表现' 或 '午餐吃什么')");
     if (!topic) return;
 
@@ -739,6 +765,17 @@ const App: React.FC = () => {
     setShowShareModal(false);
     setShareResultUrl(null);
     setShareLinkUrl(null);
+  };
+  
+  // NEW: Delete Selected Messages
+  const handleDeleteSelected = () => {
+      if (selectedMsgIds.size === 0) return;
+      if (window.confirm(`确定删除选中的 ${selectedMsgIds.size} 条消息吗?`)) {
+          updateActiveSession({
+              messages: activeSession.messages.filter(m => !selectedMsgIds.has(m.id))
+          });
+          exitSelectionMode();
+      }
   };
 
   // ... (Share logic same as before) ...
@@ -899,7 +936,18 @@ const App: React.FC = () => {
                <Menu size={24} />
              </button>
              <div className="flex flex-col">
-                <span className="font-bold text-sm md:text-lg text-slate-800 dark:text-white">{activeSession.name}</span>
+                <div className="flex items-center gap-2 overflow-hidden max-w-[180px] md:max-w-md">
+                    <span 
+                       key={activeSession.name} 
+                       className="font-bold text-sm md:text-lg text-slate-800 dark:text-white truncate block animate-fade-in"
+                       title={activeSession.name}
+                    >
+                        {activeSession.name}
+                    </span>
+                    <button onClick={handleRenameSession} className="text-slate-400 hover:text-blue-500 transition-colors shrink-0">
+                        <Edit2 size={14} />
+                    </button>
+                </div>
                 <span className="text-[10px] text-slate-500 dark:text-slate-400">
                    {activeSession.gameMode === GameMode.FREE_CHAT ? '自由模式' : activeSession.gameMode === GameMode.JUDGE_MODE ? '裁判模式' : '旁白模式'}
                    {' · '}{activeCount} 成员在线
@@ -908,45 +956,42 @@ const App: React.FC = () => {
           </div>
           <div className="flex gap-2">
              <button 
-                title="逻辑模式开关 (STEM/Rational)"
-                onClick={() => setChatState(p => ({
-                    ...p, 
-                    isLogicMode: !p.isLogicMode,
+                title="逻辑模式开关 (STEM/Rational) - 仅当前会话"
+                onClick={() => updateActiveSession({
+                    isLogicMode: !activeSession.isLogicMode,
                     isHumanMode: false,
                     isSocialMode: false // Mutually Exclusive
-                }))}
-                className={`p-2 rounded-full transition-colors ${chatState.isLogicMode ? 'text-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
+                })}
+                className={`p-2 rounded-full transition-colors ${activeSession.isLogicMode ? 'text-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
              >
                 <Cpu size={20} />
              </button>
              <button 
-                title="完全拟人社会模式 (Social Infinite Loop)"
-                onClick={() => setChatState(p => ({
-                    ...p, 
-                    isSocialMode: !p.isSocialMode,
+                title="完全拟人社会模式 (Social Infinite Loop) - 仅当前会话"
+                onClick={() => updateActiveSession({
+                    isSocialMode: !activeSession.isSocialMode,
                     isHumanMode: false, // Social mode supersedes standard human mode
                     isLogicMode: false
-                }))}
-                className={`p-2 rounded-full transition-colors ${chatState.isSocialMode ? 'text-orange-500 bg-orange-50 dark:bg-orange-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
+                })}
+                className={`p-2 rounded-full transition-colors ${activeSession.isSocialMode ? 'text-orange-500 bg-orange-50 dark:bg-orange-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
              >
                 <Coffee size={20} />
              </button>
              <button 
-                title="真人模式开关 (Human/Slang)"
-                onClick={() => setChatState(p => ({
-                    ...p, 
-                    isHumanMode: !p.isHumanMode,
+                title="真人模式开关 (Human/Slang) - 仅当前会话"
+                onClick={() => updateActiveSession({
+                    isHumanMode: !activeSession.isHumanMode,
                     isLogicMode: false,
                     isSocialMode: false
-                }))} 
-                className={`p-2 rounded-full transition-colors ${chatState.isHumanMode ? 'text-green-500 bg-green-50 dark:bg-green-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
+                })} 
+                className={`p-2 rounded-full transition-colors ${activeSession.isHumanMode ? 'text-green-500 bg-green-50 dark:bg-green-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
              >
                 <User size={20} />
              </button>
              <button 
-                title="深度思考开关"
-                onClick={() => setChatState(p => ({...p, isDeepThinking: !p.isDeepThinking}))} 
-                className={`p-2 rounded-full transition-colors ${chatState.isDeepThinking ? 'text-purple-500 bg-purple-50 dark:bg-purple-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
+                title="深度思考开关 - 仅当前会话"
+                onClick={() => updateActiveSession({ isDeepThinking: !activeSession.isDeepThinking })} 
+                className={`p-2 rounded-full transition-colors ${activeSession.isDeepThinking ? 'text-purple-500 bg-purple-50 dark:bg-purple-900/20' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
              >
                <BrainCircuit size={20} />
              </button>
@@ -997,7 +1042,7 @@ const App: React.FC = () => {
                     isSelected={selectedMsgIds.has(msg.id)}
                     onSelect={toggleSelection}
                     onLongPress={handleLongPress}
-                    isSocialMode={chatState.isSocialMode}
+                    isSocialMode={activeSession.isSocialMode}
                   />
                 )
               })}
@@ -1041,6 +1086,17 @@ const App: React.FC = () => {
                   </span>
                 </div>
                 <div className="flex gap-2 overflow-x-auto pb-1">
+                   {/* DELETE BUTTON */}
+                   <button 
+                     onClick={handleDeleteSelected}
+                     disabled={selectedMsgIds.size === 0}
+                     className="whitespace-nowrap px-4 py-2 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-colors"
+                   >
+                      <Trash2 size={14} /> 删除
+                   </button>
+                   
+                   <div className="w-px h-8 bg-slate-200 dark:bg-white/10 mx-2"></div>
+                   
                    <button 
                      onClick={() => { setShareResultUrl(null); generateShareFile('TEXT'); }}
                      disabled={selectedMsgIds.size === 0}
@@ -1102,7 +1158,7 @@ const App: React.FC = () => {
                          <Handshake size={22} />
                       </button>
                       
-                      {chatState.isSocialMode && (
+                      {activeSession.isSocialMode && (
                         <button
                             onClick={handleVote}
                             className="p-3 text-slate-400 hover:text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded-full transition-all active:scale-90 shrink-0 touch-manipulation"
