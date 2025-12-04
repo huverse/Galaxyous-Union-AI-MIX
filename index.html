@@ -30,6 +30,7 @@
               'fade-in': 'fadeIn 0.5s ease-out forwards',
               'slide-up': 'slideUp 0.3s ease-out forwards',
               'gradient-x': 'gradientX 3s ease infinite',
+              'rainbow-border': 'rainbowBorder 5s linear infinite',
             },
             keyframes: {
               fadeIn: {
@@ -50,6 +51,11 @@
                   'background-position': 'right center'
                 },
               },
+              rainbowBorder: {
+                '0%': { backgroundPosition: '0% 50%' },
+                '50%': { backgroundPosition: '100% 50%' },
+                '100%': { backgroundPosition: '0% 50%' },
+              }
             }
           },
         },
@@ -129,6 +135,61 @@
         padding: 0.5rem;
       }
       
+      /* AI Running Border Effect (Apple Intelligence Style) */
+      .ai-glow-border {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 999; /* Highest priority */
+        padding: 4px; /* Thickness of the glowing border */
+        
+        /* Mask to cut out the center, leaving only the border visible */
+        mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+        mask-composite: exclude;
+        -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+        -webkit-mask-composite: xor;
+      }
+      
+      .ai-glow-border::before {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 150vmax; 
+        height: 150vmax;
+        transform: translate(-50%, -50%);
+        /* A rich, multi-color gradient similar to Apple Intelligence */
+        background: conic-gradient(
+          from 0deg,
+          transparent 0deg,
+          transparent 260deg,
+          #ff2d55 280deg,
+          #5856d6 300deg,
+          #007aff 320deg,
+          #00ac19 330deg,
+          #ffcc00 340deg,
+          #ff9500 350deg,
+          #ff2d55 360deg
+        );
+        animation: spin-border 4s linear infinite;
+      }
+      
+      /* Soft glow backing */
+      .ai-glow-border::after {
+          content: '';
+          position: absolute;
+          inset: 0;
+          background: inherit;
+          filter: blur(10px);
+          opacity: 0.5;
+          z-index: -1;
+      }
+
+      @keyframes spin-border {
+        from { transform: translate(-50%, -50%) rotate(0deg); }
+        to { transform: translate(-50%, -50%) rotate(360deg); }
+      }
+
       /* Dark Mode Overrides (Apple Style) */
       @media (prefers-color-scheme: dark) {
         body {

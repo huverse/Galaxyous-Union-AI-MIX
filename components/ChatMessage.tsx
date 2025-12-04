@@ -1,4 +1,3 @@
-
 import React, { useMemo, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Message, Participant } from '../types';
@@ -53,11 +52,72 @@ const replaceLatexWithUnicode = (text: string): string => {
         .replace(/\^3/g, '³');
 };
 
+// Robust JSON Parser with Repair Strategies
+const tryParseJson = (str: string): any => {
+    let clean = str.trim();
+    // Remove markdown code blocks if present inside
+    clean = clean.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    
+    // Strategy 1: Direct Parse
+    try { return JSON.parse(clean); } catch (e) {}
+
+    // Strategy 2: Fix Trailing Commas & Braces
+    // e.g. "..., }}" -> "}"
+    let fixed = clean.replace(/,\s*}}+$/g, '}').replace(/,\s*]+$/g, ']');
+    try { return JSON.parse(fixed); } catch (e) {}
+
+    // Strategy 3: Fix Double Closing Braces (Common LLM Hallucination)
+    if (fixed.endsWith('}}')) fixed = fixed.slice(0, -1);
+    try { return JSON.parse(fixed); } catch (e) {}
+
+    // Strategy 4: Handle Truncated JSON (Missing closing brace)
+    if (!fixed.endsWith('}')) {
+        try { return JSON.parse(fixed + '}'); } catch (e) {}
+        try { return JSON.parse(fixed + '"}'); } catch (e) {} // Closing quote needed
+        try { return JSON.parse(fixed + '"]'); } catch (e) {}
+    }
+    
+    return null;
+};
+
+// Fallback Regex Extractor for Social Mode Fields
+const extractSocialFields = (text: string): any => {
+    const fields: any = {};
+    const keys = ["Virtual Timeline Time", "Language", "Specific Actions", "Facial Expressions", "Psychological State", "Non-specific Actions"];
+    
+    // Only attempt if it looks somewhat like the format
+    if (!text.includes("Language") && !text.includes("Specific Actions")) return null;
+
+    keys.forEach(key => {
+        // Regex looking for "Key": "Value" allowing for escaped quotes and newlines
+        // We use a non-greedy match for the value until the next quote-comma or end of block
+        const regex = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, 'i'); 
+        const match = text.match(regex);
+        if (match) {
+            fields[key] = match[1];
+        }
+    });
+    
+    // Only return if we found the core Language field or enough evidence
+    if (fields["Language"] || Object.keys(fields).length >= 2) {
+        return fields;
+    }
+    return null;
+};
+
 const parseMessageContent = (text: string): Token[] => {
   const tokens: Token[] = [];
   
-  // Handle Code Blocks first
-  const codeBlockSplit = text.split(/(```[\s\S]*?```)/g);
+  // 1. Aggressive Cleanup of System Hallucinations
+  // Models sometimes output warnings like "!Warning this is not correct..." or "(END DATA...)"
+  let cleanText = text
+    .replace(/\n!Warning[\s\S]*$/i, '') // Remove lines starting with !Warning
+    .replace(/\n\(END DATA[\s\S]*$/i, '')
+    .replace(/\nplease adjust[\s\S]*$/i, '')
+    .trim();
+
+  // 2. Handle Code Blocks first to protect them
+  const codeBlockSplit = cleanText.split(/(```[\s\S]*?```)/g);
   
   codeBlockSplit.forEach((segment, index) => {
       // Odd indices are code blocks (keep raw)
@@ -66,7 +126,7 @@ const parseMessageContent = (text: string): Token[] => {
           return;
       }
 
-      // Check for Logic Mode tags (Stem Mode)
+      // 3. Logic Mode Blocks
       if (segment.includes('[[THOUGHT]]') || segment.includes('[[RESULT]]')) {
           const logicSplit = segment.split(/(\[\[THOUGHT\]\][\s\S]*?\[\[\/THOUGHT\]\])|(\[\[RESULT\]\][\s\S]*?\[\[\/RESULT\]\])/g);
           
@@ -83,84 +143,70 @@ const parseMessageContent = (text: string): Token[] => {
           return;
       }
       
-      // Robust Unified JSON Detection
-      // Detection strategy: Look for outermost curly braces that contain at least one known key
-      let remaining = segment;
+      // 4. Unified JSON Detection (Social Mode)
+      // We look for specific keys distinctive to the Unified Output System
+      const isLikelyUnifiedJson = /"Virtual Timeline Time"|"Psychological State"|"Specific Actions"|"Language"/.test(segment);
       
-      // Attempt to find potential JSON objects (non-nested for simplicity, or greedy match)
-      const jsonCandidateRegex = /(\{[\s\S]*?\})/g;
-      
-      // Split by potential JSON objects
-      // Note: This regex is simple; complex nested JSONs might need a better parser, but for this app structure it's sufficient.
-      const parts = remaining.split(jsonCandidateRegex);
-      
-      parts.forEach(part => {
-         if (!part.trim()) return;
+      if (isLikelyUnifiedJson) {
+         // Try to find the JSON block boundaries
+         const startIdx = segment.indexOf('{');
+         const endIdx = segment.lastIndexOf('}'); // Try to find the last brace
          
-         if (jsonCandidateRegex.test(part)) {
-             // Potential JSON found
-             let isUnifiedJson = false;
-             let metadata: any = {};
+         if (startIdx !== -1) {
+             // Text before JSON?
+             const preText = segment.slice(0, startIdx).trim();
+             if (preText) tokens.push({ type: 'text', content: preText });
+
+             // Isolate the candidate JSON string
+             // If endIdx is missing or before startIdx (malformed), take whole string
+             let jsonCandidate = (endIdx > startIdx) 
+                ? segment.slice(startIdx, endIdx + 1) 
+                : segment.slice(startIdx);
              
-             // Check against known keys to distinguish from random JSON code snippets
-             if (
-                part.includes("Virtual Timeline Time") || 
-                part.includes("Psychological State") ||
-                part.includes("Specific Actions") ||
-                part.includes("Language")
-             ) {
-                isUnifiedJson = true;
-                
-                // Manual loose parsing to handle potential deviations
-                try {
-                    const inner = part.slice(1, -1);
-                    // We split by lines to handle the specific format requested, though JSON.parse is preferred if valid.
-                    // First try native parse
-                    try {
-                        metadata = JSON.parse(part);
-                    } catch (e) {
-                        // Fallback: manual line parsing (handling escaped quotes is hard here, but let's try basic)
-                        const lines = inner.split('\n');
-                        lines.forEach(line => {
-                            const colonIdx = line.indexOf(':');
-                            if (colonIdx > -1) {
-                                const key = line.slice(0, colonIdx).trim().replace(/^['"]|['"]$/g, '');
-                                let val = line.slice(colonIdx + 1).trim();
-                                if (val.endsWith(',')) val = val.slice(0, -1);
-                                if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-                                metadata[key] = val;
-                            }
-                        });
-                    }
-                } catch (e) {
-                    console.error("Failed to parse social block", e);
-                }
+             // Attempt Parse
+             let metadata = tryParseJson(jsonCandidate);
+             
+             // Attempt Fallback Extraction
+             if (!metadata) {
+                 metadata = extractSocialFields(jsonCandidate);
              }
 
-             if (isUnifiedJson) {
+             if (metadata) {
                  tokens.push({ type: 'social_block', content: '', metadata });
-             } else {
-                 // Treat as legacy Whisper if it's a simple object, otherwise just text
-                 // Legacy Whisper was { content }
-                 tokens.push({ type: 'whisper', content: part.slice(1, -1) });
-             }
-         } else {
-             // Regular text processing (Legacy support: Thought, Action, Whisper fallback)
-             const subRegex = /(\[.*?\])|(\{.*?\})|((?<!https?:)\/\/.*?\/\/)/s;
-             const subParts = part.split(subRegex).filter(p => p !== undefined && p !== '');
-             
-             subParts.forEach(sub => {
-                 if (sub.startsWith('[') && sub.endsWith(']')) {
-                     tokens.push({ type: 'thought', content: sub.slice(1, -1) });
-                 } else if (sub.startsWith('{') && sub.endsWith('}')) {
-                     tokens.push({ type: 'whisper', content: sub.slice(1, -1) });
-                 } else if (sub.startsWith('//') && sub.endsWith('//') && !sub.includes('http')) {
-                     tokens.push({ type: 'action', content: sub.slice(2, -2) });
-                 } else {
-                     tokens.push({ type: 'text', content: sub });
+                 
+                 // Handle Text AFTER JSON
+                 // If the JSON was successfully parsed up to endIdx, check if there's trailing content
+                 if (endIdx !== -1 && endIdx < segment.length - 1) {
+                     const postText = segment.slice(endIdx + 1);
+                     // Remove artifacts like ", }}" or "......"
+                     const cleanedPost = postText.replace(/^,?\s*}+/, '').trim();
+                     if (cleanedPost) {
+                         // Only add if it's substantial text, not just punctuation
+                         if (/[a-zA-Z0-9\u4e00-\u9fa5]/.test(cleanedPost)) {
+                             tokens.push({ type: 'text', content: cleanedPost });
+                         }
+                     }
                  }
-             });
+                 return; // Successfully handled this segment as Unified JSON
+             }
          }
+      }
+
+      // 5. Regular Legacy Parsing (Thought, Whisper, Action)
+      const subRegex = /(\[.*?\])|(\{.*?\})|((?<!https?:)\/\/.*?\/\/)/s;
+      const subParts = segment.split(subRegex).filter(p => p !== undefined && p !== '');
+      
+      subParts.forEach(sub => {
+          if (sub.startsWith('[') && sub.endsWith(']')) {
+              tokens.push({ type: 'thought', content: sub.slice(1, -1) });
+          } else if (sub.startsWith('{') && sub.endsWith('}')) {
+              // Legacy Whisper
+              tokens.push({ type: 'whisper', content: sub.slice(1, -1) });
+          } else if (sub.startsWith('//') && sub.endsWith('//') && !sub.includes('http')) {
+              tokens.push({ type: 'action', content: sub.slice(2, -2) });
+          } else {
+              if (sub.trim()) tokens.push({ type: 'text', content: sub });
+          }
       });
   });
 

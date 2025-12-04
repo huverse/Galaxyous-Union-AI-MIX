@@ -1,6 +1,7 @@
+
 import React, { useState, useRef } from 'react';
 import { Participant, ProviderType, GameMode } from '../types';
-import { X, Save, CheckCircle2, AlertCircle, Cpu, Key, Link2, MessageSquare, Users2, Gavel, BookOpen, MessageCircle, Plus, Trash2, Edit2, Upload, Download, ShieldCheck, ThermometerSun, UserCircle2, Zap, Wifi, Wand2, ImagePlus } from 'lucide-react';
+import { X, Save, CheckCircle2, AlertCircle, Cpu, Key, Link2, MessageSquare, Users2, Gavel, BookOpen, MessageCircle, Plus, Trash2, Edit2, Upload, Download, ShieldCheck, ThermometerSun, UserCircle2, Zap, Wifi, Wand2, ImagePlus, BarChart2, Hash, RotateCcw } from 'lucide-react';
 import { validateConnection, generatePersonaPrompt } from '../services/aiService';
 
 interface SettingsModalProps {
@@ -16,13 +17,16 @@ interface SettingsModalProps {
   onRemoveCustomParticipant: (id: string) => void;
   onExportConfig: () => void;
   onImportConfig: () => void;
+  onResetTokenUsage: (id: string) => void;
+  onResetAllTokenUsage: () => void;
 }
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ 
   isOpen, onClose, participants, onUpdateParticipant, 
   gameMode, onUpdateGameMode, specialRoleId, onUpdateSpecialRole,
   onAddCustomParticipant, onRemoveCustomParticipant,
-  onExportConfig, onImportConfig
+  onExportConfig, onImportConfig,
+  onResetTokenUsage, onResetAllTokenUsage
 }) => {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean, msg: string }>>({});
@@ -103,6 +107,16 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         reader.readAsDataURL(file);
     }
   };
+  
+  // Calculate Global Stats
+  const globalStats = participants.reduce((acc, p) => {
+      const u = p.tokenUsage || { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+      return {
+          total: acc.total + u.totalTokens,
+          prompt: acc.prompt + u.promptTokens,
+          completion: acc.completion + u.completionTokens
+      };
+  }, { total: 0, prompt: 0, completion: 0 });
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
@@ -158,6 +172,74 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span>配置使用密码加密，请妥善保管密码。</span>
              </div>
           </div>
+
+          {/* --- Token Statistics Dashboard --- */}
+          <div className="mb-8 bg-white dark:bg-[#1e1e1e] p-5 sm:p-6 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-sm">
+             <div className="flex items-center justify-between mb-4">
+               <h3 className="text-lg font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+                 <BarChart2 className="text-emerald-500" size={20}/> Token 消耗统计
+               </h3>
+               <button 
+                 onClick={onResetAllTokenUsage}
+                 title="重置所有统计"
+                 className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+               >
+                 <RotateCcw size={16} />
+               </button>
+             </div>
+             
+             {/* Global Stats */}
+             <div className="flex flex-col sm:flex-row gap-4 mb-6">
+                 <div className="flex-1 p-4 bg-slate-50 dark:bg-black/20 rounded-2xl border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center text-center">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">总消耗 (Total)</span>
+                    <span className="text-2xl font-black text-slate-700 dark:text-white">{globalStats.total.toLocaleString()}</span>
+                 </div>
+                 <div className="flex-1 p-4 bg-slate-50 dark:bg-black/20 rounded-2xl border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center text-center">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">总输入 (Prompt)</span>
+                    <span className="text-xl font-bold text-blue-600 dark:text-blue-400">{globalStats.prompt.toLocaleString()}</span>
+                 </div>
+                 <div className="flex-1 p-4 bg-slate-50 dark:bg-black/20 rounded-2xl border border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center text-center">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">总输出 (Completion)</span>
+                    <span className="text-xl font-bold text-purple-600 dark:text-purple-400">{globalStats.completion.toLocaleString()}</span>
+                 </div>
+             </div>
+
+             {/* Per Model Stats */}
+             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                 {participants.map(p => {
+                     const u = p.tokenUsage || { totalTokens: 0 };
+                     if (u.totalTokens === 0) return null;
+                     return (
+                         <div key={p.id} className="group/stat p-3 bg-slate-50 dark:bg-black/20 rounded-xl border border-slate-100 dark:border-slate-800 flex flex-col gap-1 relative">
+                             <div className="flex items-center gap-2 mb-1 justify-between">
+                                 <div className="flex items-center gap-2 overflow-hidden">
+                                     <div className={`w-4 h-4 rounded-md bg-gradient-to-br ${p.color} shrink-0`}></div>
+                                     <span className="text-xs font-bold truncate text-slate-700 dark:text-slate-300">{p.nickname || p.name}</span>
+                                 </div>
+                                 <button 
+                                     onClick={() => onResetTokenUsage(p.id)}
+                                     className="opacity-0 group-hover/stat:opacity-100 p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded text-slate-400 hover:text-slate-600 transition-all"
+                                     title="重置统计"
+                                 >
+                                     <RotateCcw size={10} />
+                                 </button>
+                             </div>
+                             <div className="flex justify-between items-baseline">
+                                 <span className="text-[10px] text-slate-400">Total:</span>
+                                 <span className="text-sm font-bold text-slate-800 dark:text-slate-100">{u.totalTokens.toLocaleString()}</span>
+                             </div>
+                         </div>
+                     );
+                 })}
+                 {globalStats.total === 0 && (
+                     <div className="col-span-full text-center py-4 text-sm text-slate-400 italic">
+                         暂无 Token 消耗数据。
+                     </div>
+                 )}
+             </div>
+          </div>
+
+          <div className="h-px w-full bg-slate-200 dark:bg-slate-700 mb-8"></div>
 
           {/* --- Game Mode Selection Section --- */}
           <div className="mb-8 bg-white dark:bg-[#1e1e1e] p-5 sm:p-6 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-sm">
@@ -368,8 +450,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                          </div>
 
                          <div className="space-y-2">
-                          <label className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
-                            <Link2 size={14} /> Base URL
+                          <label className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider">
+                             <div className="flex items-center gap-2"><Link2 size={14} /> Base URL</div>
+                             {p.provider === ProviderType.OPENAI_COMPATIBLE && (
+                                <span className="text-[10px] text-slate-400 font-normal normal-case">通常需以 /v1 结尾 (如: /v1)</span>
+                             )}
                           </label>
                           <input 
                             type="url"

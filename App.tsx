@@ -1,11 +1,12 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2 } from 'lucide-react';
+import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2, BarChart2, Wand2 } from 'lucide-react';
 import { DEFAULT_PARTICIPANTS, USER_ID } from './constants';
-import { Message, Participant, ParticipantConfig, GameMode, Session, ProviderType } from './types';
+import { Message, Participant, ParticipantConfig, GameMode, Session, ProviderType, TokenUsage } from './types';
 import ChatMessage from './components/ChatMessage';
 import SettingsModal from './components/SettingsModal';
 import CollaborationModal from './components/CollaborationModal';
+import MultimodalCenter from './components/MultimodalCenter';
 import { generateResponse, generateSessionTitle } from './services/aiService';
 
 // Declare html2canvas globally
@@ -75,7 +76,8 @@ const createNewSession = (): Session => ({
   isDeepThinking: false,
   isHumanMode: false,
   isLogicMode: false,
-  isSocialMode: false
+  isSocialMode: false,
+  tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
 });
 
 // Dynamic Gemini Star Icon (New Style)
@@ -119,7 +121,8 @@ const App: React.FC = () => {
                 ...def, 
                 nickname: found.nickname ?? def.nickname,
                 avatar: found.avatar ?? def.avatar,
-                config: { ...def.config, ...found.config } 
+                config: { ...def.config, ...found.config },
+                tokenUsage: found.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
             };
           }
           return def;
@@ -153,11 +156,12 @@ const App: React.FC = () => {
                 isProcessing: false,
                 currentTurnParticipantId: null,
                 isAutoPlayStopped: false, // Reset stop state on load
-                // Migration logic for old sessions that lack independent state
+                // Migration logic for old sessions
                 isDeepThinking: s.isDeepThinking ?? false,
                 isHumanMode: s.isHumanMode ?? false,
                 isLogicMode: s.isLogicMode ?? false,
-                isSocialMode: s.isSocialMode ?? false
+                isSocialMode: s.isSocialMode ?? false,
+                tokenUsage: s.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
             }));
         }
       }
@@ -171,7 +175,7 @@ const App: React.FC = () => {
   const sessionControllersRef = useRef<Map<string, AbortController>>(new Map());
   
   // Ref for Social Mode Auto-Drive
-  const socialModeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const socialModeTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (sessions.length === 0) {
@@ -194,6 +198,7 @@ const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCollaborationOpen, setIsCollaborationOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isMultimodalOpen, setIsMultimodalOpen] = useState(false); // NEW STATE
   
   // Selection / Share State
   const [selectionMode, setSelectionMode] = useState(false);
@@ -253,7 +258,7 @@ const App: React.FC = () => {
     ) {
         const delay = Math.floor(Math.random() * 5000) + 5000; // Random delay 5-10s
         
-        socialModeTimerRef.current = setTimeout(() => {
+        socialModeTimerRef.current = window.setTimeout(() => {
             // Pick a random enabled participant to speak next
             const enabledP = participantsRef.current.filter(p => p.config.enabled && p.id !== activeSession.specialRoleId);
             if (enabledP.length > 0) {
@@ -326,6 +331,7 @@ const App: React.FC = () => {
     const newParticipant: Participant = {
       id: newId, name: `Custom Model ${customCount + 1}`, nickname: `Custom AI`, avatar: '',
       color: 'from-slate-500 to-slate-700', provider: ProviderType.OPENAI_COMPATIBLE, description: '自定义模型', isCustom: true,
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       config: { apiKey: '', baseUrl: '', modelName: '', enabled: true, temperature: 0.7, systemInstruction: '你是一个自定义 AI 模型。' }
     };
     setParticipants(prev => [...prev, newParticipant]);
@@ -341,12 +347,13 @@ const App: React.FC = () => {
   const handleUpdateParticipant = (id: string, updates: Partial<ParticipantConfig> | Partial<Participant>) => {
     setParticipants(prev => prev.map(p => {
       if (p.id !== id) return p;
-      const { name, nickname, avatar, color, ...configUpdates } = updates as any;
+      const { name, nickname, avatar, color, tokenUsage, ...configUpdates } = updates as any;
       let updatedP = { ...p };
       if (name !== undefined) updatedP.name = name;
       if (nickname !== undefined) updatedP.nickname = nickname;
       if (avatar !== undefined) updatedP.avatar = avatar;
       if (color !== undefined) updatedP.color = color;
+      if (tokenUsage !== undefined) updatedP.tokenUsage = tokenUsage;
       
       const configKeys = ['apiKey', 'baseUrl', 'modelName', 'enabled', 'systemInstruction', 'allianceId', 'temperature'];
       const newConfig = { ...p.config };
@@ -362,6 +369,23 @@ const App: React.FC = () => {
       return updatedP;
     }));
   };
+
+  const handleResetTokenUsage = (id: string) => {
+    if (window.confirm("确定要重置此模型的 Token 统计数据吗？")) {
+        handleUpdateParticipant(id, {
+            tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+        });
+    }
+  };
+
+  const handleResetAllTokenUsage = () => {
+      if (window.confirm("确定要重置所有模型的 Token 统计数据吗？此操作不可逆。")) {
+          setParticipants(prev => prev.map(p => ({
+              ...p,
+              tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+          })));
+      }
+  }
 
   const handleExportConfig = async () => {
     const password = prompt("为了保护您的 API Key，请输入一个密码来加密配置文件：");
@@ -415,7 +439,14 @@ const App: React.FC = () => {
           controller.abort();
           sessionControllersRef.current.delete(activeSessionId);
        }
-       updateActiveSession({ messages: [], pendingKickRequest: null, isProcessing: false, currentTurnParticipantId: null, isAutoPlayStopped: false });
+       updateActiveSession({ 
+           messages: [], 
+           pendingKickRequest: null, 
+           isProcessing: false, 
+           currentTurnParticipantId: null, 
+           isAutoPlayStopped: false,
+           tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } // Reset Tokens
+        });
        exitSelectionMode();
     }
   };
@@ -454,10 +485,12 @@ const App: React.FC = () => {
 
   // --- Core Async Logic ---
   const processPartyRound = async (targetSessionId: string, history: Message[], specificParticipantIds?: string[], forceTriggerJudge: boolean = false) => {
-    // 1. Set Processing State
+    // ... (generateResponse logic preserved from previous file)
+    // To save XML tokens, I am reusing the logic from previous messages implicitly or I'd paste the full block.
+    // Given the prompt, I must output full content. So I will paste the previous processPartyRound fully.
+    
     updateSessionById(targetSessionId, { isProcessing: true });
     
-    // 2. Setup Independent Controller
     const controller = new AbortController();
     sessionControllersRef.current.set(targetSessionId, controller);
     const signal = controller.signal;
@@ -470,7 +503,6 @@ const App: React.FC = () => {
     const skippedIds = new Set<string>(); 
 
     try {
-      // Judge Logic
       const shouldRunJudge = (initialSession.gameMode !== GameMode.FREE_CHAT && specialRoleParticipant && specialRoleParticipant.config.apiKey)
         && (!specificParticipantIds || forceTriggerJudge);
 
@@ -479,7 +511,7 @@ const App: React.FC = () => {
           const roleType = initialSession.gameMode === GameMode.JUDGE_MODE ? 'JUDGE' : 'NARRATOR';
           
           try {
-              const responseText = await generateResponse(
+              const { content: responseText, usage } = await generateResponse(
                   specialRoleParticipant!,
                   currentRoundHistory,
                   participantsRef.current, 
@@ -494,8 +526,25 @@ const App: React.FC = () => {
 
               if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
+              if (usage) {
+                  updateSessionById(targetSessionId, {
+                      tokenUsage: {
+                          promptTokens: (getLatestSession().tokenUsage?.promptTokens || 0) + usage.promptTokens,
+                          completionTokens: (getLatestSession().tokenUsage?.completionTokens || 0) + usage.completionTokens,
+                          totalTokens: (getLatestSession().tokenUsage?.totalTokens || 0) + usage.totalTokens
+                      }
+                  });
+                  
+                  handleUpdateParticipant(specialRoleParticipant!.id, {
+                      tokenUsage: {
+                          promptTokens: (specialRoleParticipant!.tokenUsage?.promptTokens || 0) + usage.promptTokens,
+                          completionTokens: (specialRoleParticipant!.tokenUsage?.completionTokens || 0) + usage.completionTokens,
+                          totalTokens: (specialRoleParticipant!.tokenUsage?.totalTokens || 0) + usage.totalTokens
+                      }
+                  });
+              }
+
               if (responseText.trim() === '[PASS]' && !forceTriggerJudge) {
-                  // Pass
               } else {
                   let contentToDisplay = responseText;
                   let kickRequest = null;
@@ -543,7 +592,6 @@ const App: React.FC = () => {
           }
       }
 
-      // Active Players
       let activePlayers = participantsRef.current.filter(p => 
           p.config.enabled && 
           p.config.apiKey && 
@@ -567,7 +615,7 @@ const App: React.FC = () => {
         updateSessionById(targetSessionId, { currentTurnParticipantId: p.id });
         
         try {
-          const responseText = await generateResponse(
+          const { content: responseText, usage } = await generateResponse(
               latestP, 
               currentRoundHistory, 
               participantsRef.current, 
@@ -581,6 +629,24 @@ const App: React.FC = () => {
           );
           
           if (signal.aborted) break;
+
+          if (usage) {
+              updateSessionById(targetSessionId, {
+                  tokenUsage: {
+                      promptTokens: (getLatestSession().tokenUsage?.promptTokens || 0) + usage.promptTokens,
+                      completionTokens: (getLatestSession().tokenUsage?.completionTokens || 0) + usage.completionTokens,
+                      totalTokens: (getLatestSession().tokenUsage?.totalTokens || 0) + usage.totalTokens
+                  }
+              });
+              
+              handleUpdateParticipant(p.id, {
+                  tokenUsage: {
+                      promptTokens: (latestP.tokenUsage?.promptTokens || 0) + usage.promptTokens,
+                      completionTokens: (latestP.tokenUsage?.completionTokens || 0) + usage.completionTokens,
+                      totalTokens: (latestP.tokenUsage?.totalTokens || 0) + usage.totalTokens
+                  }
+              });
+          }
 
           const postGenP = participantsRef.current.find(curr => curr.id === p.id);
           if (!postGenP || !postGenP.config.enabled) continue;
@@ -600,11 +666,7 @@ const App: React.FC = () => {
           }));
           currentRoundHistory.push(newMessage);
           
-          // --- AUTO-TITLE GENERATION ---
-          // Logic: If user sent 1 message, and AI just replied (now 2 messages total), generate title.
           const currentTotal = currentRoundHistory.length;
-          // Note: history param has the snapshot BEFORE this AI message.
-          // currentRoundHistory has the NEW snapshot.
           if (currentTotal === 2 && currentRoundHistory[0].senderId === USER_ID) {
               const geminiP = participantsRef.current.find(p => p.provider === ProviderType.GEMINI && p.config.apiKey);
               if (geminiP) {
@@ -645,13 +707,9 @@ const App: React.FC = () => {
         content: `**[任务指派]**\n\n**协作任务**: ${task}\n**参与者**: ${selectedNames}\n\n请各位协作完成此任务。`,
         timestamp: Date.now()
      };
-     // Safe Update
      const targetSessionId = activeSessionId;
      const updatedMessages = [...activeSession.messages, systemMsg];
-     
-     // User initiated action, so resume auto play
      updateSessionById(targetSessionId, { messages: updatedMessages, isAutoPlayStopped: false });
-     
      processPartyRound(targetSessionId, updatedMessages, selectedIds);
   };
 
@@ -668,11 +726,7 @@ const App: React.FC = () => {
     };
     const targetSessionId = activeSessionId;
     const updatedMessages = [...activeSession.messages, voteMsg];
-    
-    // Resume auto play
     updateSessionById(targetSessionId, { messages: updatedMessages, isAutoPlayStopped: false });
-    
-    // Trigger everyone to vote
     const allEnabledIds = participants.filter(p => p.config.enabled && p.id !== activeSession.specialRoleId).map(p => p.id);
     processPartyRound(targetSessionId, updatedMessages, allEnabledIds);
   };
@@ -684,7 +738,7 @@ const App: React.FC = () => {
     }
     if ((!inputText.trim() && inputImages.length === 0)) return;
 
-    const targetSessionId = activeSessionId; // Capture ID immediately
+    const targetSessionId = activeSessionId; 
     const userMessage: Message = {
       id: Date.now().toString(),
       senderId: USER_ID,
@@ -693,16 +747,12 @@ const App: React.FC = () => {
       timestamp: Date.now()
     };
     
-    // Optimistic Update
     const currentMessages = activeSession.messages;
     const updatedMessages = [...currentMessages, userMessage];
-    
-    // Reset stop flag on user action
     updateSessionById(targetSessionId, { messages: updatedMessages, isAutoPlayStopped: false });
     
     const lowerText = inputText.toLowerCase();
 
-    // Judge Detection
     const judgeKeywords = ['裁判', '法官', 'judge', 'admin', 'host'];
     const specialRoleP = participants.find(p => p.id === activeSession.specialRoleId);
     const isCallingJudge = activeSession.gameMode !== GameMode.FREE_CHAT && (
@@ -742,7 +792,6 @@ const App: React.FC = () => {
     processPartyRound(targetSessionId, updatedMessages, specificTargetIds, isCallingJudge);
   };
 
-  // ... (Long press selection logic same as before) ...
   const handleLongPress = (id: string) => {
     if (!selectionMode) {
       setSelectionMode(true);
@@ -767,7 +816,6 @@ const App: React.FC = () => {
     setShareLinkUrl(null);
   };
   
-  // NEW: Delete Selected Messages
   const handleDeleteSelected = () => {
       if (selectedMsgIds.size === 0) return;
       if (window.confirm(`确定删除选中的 ${selectedMsgIds.size} 条消息吗?`)) {
@@ -778,7 +826,6 @@ const App: React.FC = () => {
       }
   };
 
-  // ... (Share logic same as before) ...
   const generateShareImage = async () => {
     setIsGeneratingShare(true);
     try {
@@ -870,7 +917,9 @@ const App: React.FC = () => {
 
         <div className="flex-1 overflow-y-auto space-y-2 scrollbar-hide mb-4">
            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest px-2 mb-2">历史聚会</h3>
-           {sessions.map(s => (
+           {sessions.map(s => {
+             const tokens = s.tokenUsage || { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+             return (
              <div 
                 key={s.id}
                 onClick={() => { setActiveSessionId(s.id); setIsSidebarOpen(false); }}
@@ -882,17 +931,27 @@ const App: React.FC = () => {
                   }
                 `}
              >
-                <div className="flex items-center gap-3 overflow-hidden">
+                <div className="flex items-center gap-3 overflow-hidden flex-1">
                    <div className={`w-2 h-2 rounded-full shrink-0 ${activeSessionId === s.id ? 'bg-blue-500' : 'bg-slate-300'}`}></div>
-                   <div className="truncate">
+                   <div className="truncate flex-1">
                       <div className={`text-sm font-medium truncate ${activeSessionId === s.id ? 'text-slate-800 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
-                        {s.name}
+                        <span key={s.name} className={`block truncate ${activeSessionId === s.id ? 'animate-fade-in' : ''}`}>{s.name}</span>
                       </div>
-                      <div className="text-[10px] text-slate-400">
-                        {new Date(s.lastModified).toLocaleTimeString()} · {s.messages.length} 条消息
+                      <div className="text-[10px] text-slate-400 flex justify-between items-center mt-1">
+                          <span>{new Date(s.lastModified).toLocaleTimeString()} · {s.messages.length} 消息</span>
                       </div>
                    </div>
                 </div>
+                
+                <div className="flex flex-col items-end justify-center ml-2 pl-2 border-l border-slate-200 dark:border-white/10 text-[9px] font-mono leading-tight shrink-0 text-slate-400">
+                    <span className="font-bold text-slate-500 dark:text-slate-300">{tokens.totalTokens.toLocaleString()}</span>
+                    <div className="flex gap-1 opacity-75">
+                        <span className="text-purple-500">{tokens.completionTokens.toLocaleString()}</span>
+                        <span>|</span>
+                        <span className="text-blue-500">{tokens.promptTokens.toLocaleString()}</span>
+                    </div>
+                </div>
+
                 {s.isProcessing && (
                    <div className="absolute right-2 top-2 animate-spin text-blue-500">
                       <BrainCircuit size={12} />
@@ -900,12 +959,13 @@ const App: React.FC = () => {
                 )}
                 <button 
                   onClick={(e) => handleDeleteSession(s.id, e)}
-                  className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                  className="absolute right-1 top-1 p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg opacity-0 group-hover:opacity-100 transition-all bg-white dark:bg-black shadow-sm"
                 >
                   <Trash2 size={14} />
                 </button>
              </div>
-           ))}
+             );
+           })}
         </div>
 
         <div className="pt-4 border-t border-slate-200 dark:border-white/10">
@@ -918,7 +978,8 @@ const App: React.FC = () => {
           </button>
         </div>
       </div>
-
+      
+      {/* ... Rest of the component (Main Chat, Modals) ... */}
       {isSidebarOpen && (
         <div 
           className="fixed inset-0 bg-black/40 backdrop-blur-sm z-20 lg:hidden animate-fade-in"
@@ -928,7 +989,6 @@ const App: React.FC = () => {
 
       {/* --- Main Chat --- */}
       <div className="flex-1 flex flex-col relative bg-white dark:bg-black h-full w-full max-w-full">
-        
         {/* Header */}
         <div className="h-16 bg-[#f5f5f7]/80 dark:bg-[#1c1c1e]/80 backdrop-blur-md border-b border-slate-200 dark:border-black/50 flex items-center justify-between px-4 z-20 sticky top-0 shrink-0">
           <div className="flex items-center gap-3">
@@ -1168,6 +1228,16 @@ const App: React.FC = () => {
                             <Vote size={22} />
                         </button>
                       )}
+
+                      {/* Multimodal Trigger */}
+                      <button
+                        onClick={() => setIsMultimodalOpen(true)}
+                        className="p-3 rounded-full shrink-0 touch-manipulation relative overflow-hidden group active:scale-95"
+                        title="多模态创作模式"
+                      >
+                         <div className="absolute inset-0 bg-gradient-to-tr from-pink-500 via-purple-500 to-indigo-500 opacity-80 group-hover:opacity-100 transition-opacity"></div>
+                         <Wand2 size={22} className="relative z-10 text-white" />
+                      </button>
                   </div>
 
                   <input type="file" ref={fileInputRef} className="hidden" accept="image/*" multiple onChange={(e) => {
@@ -1209,7 +1279,123 @@ const App: React.FC = () => {
           </div>
         )}
       </div>
+      
+      {/* ... Existing Modals ... */}
+      {/* KICK REQUEST MODAL */}
+      {activeSession.pendingKickRequest && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-sm sm:max-w-md rounded-2xl p-6 shadow-2xl animate-slide-up border border-slate-100 dark:border-white/10">
+            <div className="flex flex-col items-center text-center mb-6">
+              <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-600 mb-4">
+                <AlertTriangle size={32} />
+              </div>
+              <h3 className="text-xl font-bold text-slate-900 dark:text-white">裁判裁决: 淘汰玩家</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mt-2 leading-relaxed">
+                裁判请求将 <strong className="text-slate-900 dark:text-white px-1">{participants.find(p => p.id === activeSession.pendingKickRequest?.targetId)?.nickname || '未知'}</strong> 
+                <span className="text-xs opacity-75">此操作将禁止该 AI 继续参与本次聚会。</span>
+              </p>
+              <div className="mt-4 w-full bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 rounded-xl p-3">
+                <p className="text-xs font-mono text-red-600 dark:text-red-400 text-left">
+                  <strong>REASON:</strong> {activeSession.pendingKickRequest.reason}
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => updateActiveSession({ pendingKickRequest: null })}
+                className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-white/10 dark:hover:bg-white/20 text-slate-600 dark:text-slate-300 font-bold text-sm transition-colors"
+              >
+                驳回请求
+              </button>
+              <button
+                onClick={() => activeSession.pendingKickRequest && executeKick(activeSession.pendingKickRequest.targetId)}
+                className="flex-1 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-500/30 transition-colors"
+              >
+                确认淘汰
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Collaboration Modal */}
+      <CollaborationModal
+        isOpen={isCollaborationOpen}
+        onClose={() => setIsCollaborationOpen(false)}
+        participants={participants}
+        onStartCollaboration={handleStartCollaboration}
+      />
+      
+      {/* Settings Modal */}
+      <SettingsModal 
+        isOpen={isSettingsOpen} 
+        onClose={() => setIsSettingsOpen(false)}
+        participants={participants}
+        onUpdateParticipant={handleUpdateParticipant}
+        gameMode={activeSession.gameMode}
+        onUpdateGameMode={handleUpdateGameMode}
+        specialRoleId={activeSession.specialRoleId}
+        onUpdateSpecialRole={handleUpdateSpecialRole}
+        onAddCustomParticipant={handleAddCustomParticipant}
+        onRemoveCustomParticipant={handleRemoveCustomParticipant}
+        onExportConfig={handleExportConfig}
+        onImportConfig={() => configFileInputRef.current?.click()}
+        onResetTokenUsage={handleResetTokenUsage}
+        onResetAllTokenUsage={handleResetAllTokenUsage}
+      />
 
+      {/* NEW: Multimodal Center */}
+      <MultimodalCenter 
+        isOpen={isMultimodalOpen}
+        onClose={() => setIsMultimodalOpen(false)}
+        participants={participants}
+      />
+
+      {/* Share Modal */}
+      {showShareModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in" onClick={() => setShowShareModal(false)}>
+           <div className="bg-white dark:bg-[#1e1e1e] w-full max-w-lg rounded-3xl p-6 shadow-2xl animate-slide-up relative" onClick={e => e.stopPropagation()}>
+              <button onClick={() => setShowShareModal(false)} className="absolute top-4 right-4 p-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500 hover:bg-slate-200 transition-colors">
+                <X size={20} />
+              </button>
+              
+              <h3 className="text-xl font-bold mb-6 text-slate-800 dark:text-white flex items-center gap-2">
+                 <Share2 size={24} className="text-blue-500"/> 分享对话
+              </h3>
+              
+              <div className="flex flex-col gap-4">
+                 {shareResultUrl ? (
+                    <div className="relative rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-black/30">
+                       <img src={shareResultUrl} className="w-full h-auto max-h-[60vh] object-contain" alt="Share Preview" />
+                    </div>
+                 ) : shareLinkUrl ? (
+                    <div className="p-8 bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-2xl text-center">
+                        <FileJson size={48} className="mx-auto text-blue-500 mb-4" />
+                        <p className="text-slate-600 dark:text-slate-300 font-medium mb-2">文件已生成</p>
+                        <p className="text-xs text-slate-400">格式: {shareType}</p>
+                    </div>
+                 ) : (
+                    <div className="p-12 flex items-center justify-center">
+                       <Sparkles className="animate-spin text-blue-500" size={32} />
+                    </div>
+                 )}
+                 
+                 <div className="flex gap-3 mt-2">
+                    <a 
+                      href={shareResultUrl || shareLinkUrl || '#'} 
+                      download={shareResultUrl ? `galaxyous-share-${Date.now()}.png` : `galaxyous-export-${Date.now()}.${shareType === 'JSON' ? 'json' : 'txt'}`}
+                      className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm shadow-lg shadow-blue-500/30 flex items-center justify-center gap-2 transition-all active:scale-95"
+                      onClick={(e) => { if(!shareResultUrl && !shareLinkUrl) e.preventDefault(); }}
+                    >
+                      <Download size={18} /> 下载{shareResultUrl ? '图片' : '文件'}
+                    </a>
+                 </div>
+              </div>
+           </div>
+        </div>
+      )}
+      
+      {/* Import Password Modal */}
       {pendingImportFile && (
          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
              <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up border border-slate-100 dark:border-white/10">
@@ -1251,98 +1437,6 @@ const App: React.FC = () => {
              </div>
          </div>
       )}
-
-      {/* ... Other modals (Kick/Share/Collab/Settings) ... */}
-      {/* Keeping structure identical but styles updated via global CSS and dark classes */}
-
-      {activeSession.pendingKickRequest && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fade-in">
-           <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-sm sm:max-w-md rounded-2xl p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] border border-red-200 dark:border-red-900/50 ring-1 ring-red-100 dark:ring-red-900/50 transform transition-all scale-100">
-              <div className="flex flex-col items-center text-center mb-6">
-                 <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-600 mb-4 animate-pulse">
-                    <AlertTriangle size={32} />
-                 </div>
-                 <h3 className="text-xl font-bold text-slate-900 dark:text-white">裁判裁决: 淘汰玩家?</h3>
-                 <p className="text-sm text-slate-500 dark:text-slate-400 mt-2 leading-relaxed">
-                   裁判请求将 <strong className="text-slate-900 dark:text-slate-100 px-1">{participants.find(p => p.id === activeSession.pendingKickRequest?.targetId)?.nickname || participants.find(p => p.id === activeSession.pendingKickRequest?.targetId)?.name}</strong> 移出游戏。<br/>
-                   <span className="text-xs opacity-75">此操作将禁止该 AI 继续参与本次聚会。</span>
-                 </p>
-                 <div className="mt-4 w-full bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 rounded-lg p-3">
-                    <p className="text-xs font-mono text-red-600 dark:text-red-400 text-left">
-                       <strong>REASON:</strong> {activeSession.pendingKickRequest.reason}
-                    </p>
-                 </div>
-              </div>
-              <div className="flex gap-3">
-                 <button 
-                   onClick={() => updateActiveSession({ pendingKickRequest: null })} 
-                   className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-white/10 dark:hover:bg-white/20 text-slate-600 dark:text-slate-300 font-bold text-sm transition-colors"
-                 >
-                   驳回请求
-                 </button>
-                 <button 
-                   onClick={() => activeSession.pendingKickRequest && executeKick(activeSession.pendingKickRequest.targetId)} 
-                   className="flex-1 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-500/30 transition-all active:scale-95"
-                 >
-                   确认淘汰
-                 </button>
-              </div>
-           </div>
-        </div>
-      )}
-
-      {showShareModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fade-in">
-          <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-slide-up border border-slate-100 dark:border-white/10">
-            <div className="p-4 border-b border-slate-100 dark:border-white/10 flex justify-between items-center">
-              <h3 className="font-bold text-lg text-slate-900 dark:text-white">导出内容</h3>
-              <button onClick={() => setShowShareModal(false)} className="p-1 hover:bg-slate-100 dark:hover:bg-white/10 rounded-full text-slate-500 dark:text-slate-300"><X size={20} /></button>
-            </div>
-            <div className="p-6 flex flex-col items-center">
-              {shareResultUrl ? (
-                <>
-                  <div className="max-h-[50vh] overflow-y-auto w-full mb-4 border rounded-lg"><img src={shareResultUrl} className="w-full" /></div>
-                  <a href={shareResultUrl} download={`galaxyous-chat-${Date.now()}.png`} className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold flex items-center justify-center gap-2"><Download size={20} /> 保存图片</a>
-                </>
-              ) : shareLinkUrl ? (
-                <div className="w-full text-center space-y-4">
-                  <div className="p-6 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 rounded-2xl border border-green-200 dark:border-green-800">
-                     <Check className="mx-auto mb-2" size={40} />
-                     <p className="font-bold">{shareType === 'JSON' ? 'JSON 数据' : '文本记录'} 已生成</p>
-                  </div>
-                   <a href={shareLinkUrl} download={`galaxyous-export-${Date.now()}.${shareType === 'JSON' ? 'json' : 'txt'}`} className="w-full py-3 bg-slate-800 dark:bg-white/10 hover:bg-slate-900 dark:hover:bg-white/20 text-white rounded-xl font-bold flex items-center justify-center gap-2">
-                    <Download size={20} /> 下载文件
-                  </a>
-                </div>
-              ) : (
-                <div className="py-10 text-slate-400">Loading...</div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      <CollaborationModal
-        isOpen={isCollaborationOpen}
-        onClose={() => setIsCollaborationOpen(false)}
-        participants={participants}
-        onStartCollaboration={handleStartCollaboration}
-      />
-
-      <SettingsModal 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)}
-        participants={participants}
-        onUpdateParticipant={handleUpdateParticipant}
-        gameMode={activeSession.gameMode}
-        onUpdateGameMode={handleUpdateGameMode}
-        specialRoleId={activeSession.specialRoleId}
-        onUpdateSpecialRole={handleUpdateSpecialRole}
-        onAddCustomParticipant={handleAddCustomParticipant}
-        onRemoveCustomParticipant={handleRemoveCustomParticipant}
-        onExportConfig={handleExportConfig}
-        onImportConfig={() => configFileInputRef.current?.click()}
-      />
     </div>
   );
 };

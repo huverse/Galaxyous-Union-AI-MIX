@@ -10,6 +10,20 @@ export enum GameMode {
   NARRATOR_MODE = 'NARRATOR_MODE'
 }
 
+export enum MultimodalTool {
+  IMAGE_GEN = 'IMAGE_GEN',
+  VIDEO_GEN = 'VIDEO_GEN',
+  AUDIO_TTS = 'AUDIO_TTS',
+  ANALYSIS = 'ANALYSIS',
+  LIVE_VOICE = 'LIVE_VOICE'
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface ParticipantConfig {
   apiKey: string;
   baseUrl: string;
@@ -30,6 +44,7 @@ export interface Participant {
   config: ParticipantConfig;
   description: string;
   isCustom?: boolean; // Flag for user-added models
+  tokenUsage?: TokenUsage; // Track usage per model
 }
 
 export interface Message {
@@ -37,6 +52,8 @@ export interface Message {
   senderId: string; // 'user' or participant.id
   content: string; // Raw content containing [], {}, // markers
   images?: string[]; // Base64 strings
+  videos?: string[]; // URL or Base64
+  audios?: string[]; // Base64 (TTS result)
   timestamp: number;
   isError?: boolean;
 }
@@ -66,6 +83,8 @@ export interface Session {
   isHumanMode: boolean; 
   isLogicMode: boolean; 
   isSocialMode: boolean; 
+  
+  tokenUsage: TokenUsage; // Track usage per session
 }
 
 // Deprecated: ChatState is now merged into Session

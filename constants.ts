@@ -1,6 +1,8 @@
 
 import { Participant, ProviderType } from './types';
 
+const defaultUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
 export const DEFAULT_PARTICIPANTS: Participant[] = [
   {
     id: 'gemini',
@@ -10,6 +12,7 @@ export const DEFAULT_PARTICIPANTS: Participant[] = [
     color: 'from-blue-400 to-indigo-500',
     provider: ProviderType.GEMINI,
     description: 'Google DeepMind 的多模态模型',
+    tokenUsage: { ...defaultUsage },
     config: {
       apiKey: '',
       baseUrl: '',
@@ -27,6 +30,7 @@ export const DEFAULT_PARTICIPANTS: Participant[] = [
     color: 'from-green-400 to-emerald-600',
     provider: ProviderType.OPENAI_COMPATIBLE,
     description: 'OpenAI 的旗舰模型',
+    tokenUsage: { ...defaultUsage },
     config: {
       apiKey: '',
       baseUrl: 'https://api.openai.com/v1',
@@ -44,6 +48,7 @@ export const DEFAULT_PARTICIPANTS: Participant[] = [
     color: 'from-blue-600 to-blue-800',
     provider: ProviderType.OPENAI_COMPATIBLE,
     description: '深度求索的高级推理模型',
+    tokenUsage: { ...defaultUsage },
     config: {
       apiKey: '',
       baseUrl: 'https://api.deepseek.com',
@@ -61,6 +66,7 @@ export const DEFAULT_PARTICIPANTS: Participant[] = [
     color: 'from-red-400 to-pink-500',
     provider: ProviderType.OPENAI_COMPATIBLE,
     description: '字节跳动的智能助手',
+    tokenUsage: { ...defaultUsage },
     config: {
       apiKey: '',
       baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
