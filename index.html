@@ -9,7 +9,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
     <script>
       tailwind.config = {
         darkMode: 'media', // Uses system preference
@@ -17,6 +18,7 @@
           extend: {
             fontFamily: {
               sans: ['"Inter"', '"Noto Sans SC"', 'sans-serif'],
+              mono: ['"JetBrains Mono"', 'monospace'],
             },
             colors: {
               apple: {
@@ -31,6 +33,7 @@
               'slide-up': 'slideUp 0.3s ease-out forwards',
               'gradient-x': 'gradientX 3s ease infinite',
               'rainbow-border': 'rainbowBorder 5s linear infinite',
+              'spin-slow': 'spin 3s linear infinite',
             },
             keyframes: {
               fadeIn: {
@@ -95,7 +98,7 @@
         word-wrap: break-word;
         word-break: break-word;
         max-width: 100%;
-        line-height: 1.6;
+        line-height: 1.75;
       }
 
       .markdown-body img {
@@ -120,7 +123,7 @@
         background-color: rgba(0,0,0,0.05);
         padding: 0.125rem 0.25rem;
         border-radius: 0.25rem;
-        font-family: monospace;
+        font-family: 'JetBrains Mono', monospace;
         font-size: 0.9em;
       }
 
@@ -133,6 +136,24 @@
       .markdown-body th, .markdown-body td {
         border: 1px solid #e5e5e5;
         padding: 0.5rem;
+      }
+      
+      .markdown-body blockquote {
+        border-left: 4px solid #e5e7eb;
+        padding-left: 1rem;
+        color: #6b7280;
+        font-style: italic;
+      }
+
+      /* KaTeX Adjustments */
+      .katex-display {
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding: 0.5rem 0;
+        margin: 0.5rem 0;
+      }
+      .katex {
+        font-size: 1.1em;
       }
       
       /* AI Running Border Effect (Apple Intelligence Style) */
@@ -208,6 +229,10 @@
         .markdown-body th, .markdown-body td {
            border-color: #333;
         }
+        .markdown-body blockquote {
+           border-left-color: #374151;
+           color: #9ca3af;
+        }
       }
     </style>
   <script type="importmap">
@@ -215,6 +240,8 @@
   "imports": {
     "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0",
     "react-markdown": "https://aistudiocdn.com/react-markdown@^10.1.0",
+    "remark-math": "https://esm.sh/remark-math@6",
+    "rehype-katex": "https://esm.sh/rehype-katex@7",
     "react/": "https://aistudiocdn.com/react@^19.2.0/",
     "react": "https://aistudiocdn.com/react@^19.2.0",
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",

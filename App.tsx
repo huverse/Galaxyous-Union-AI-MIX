@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2, BarChart2, Wand2 } from 'lucide-react';
+import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2, BarChart2, Wand2, RefreshCw } from 'lucide-react';
 import { DEFAULT_PARTICIPANTS, USER_ID } from './constants';
 import { Message, Participant, ParticipantConfig, GameMode, Session, ProviderType, TokenUsage } from './types';
 import ChatMessage from './components/ChatMessage';
@@ -72,6 +72,7 @@ const createNewSession = (): Session => ({
   isProcessing: false,
   currentTurnParticipantId: null,
   isAutoPlayStopped: false,
+  isAutoLoop: false, // Default off
   // New Independent State Defaults
   isDeepThinking: false,
   isHumanMode: false,
@@ -161,6 +162,7 @@ const App: React.FC = () => {
                 isHumanMode: s.isHumanMode ?? false,
                 isLogicMode: s.isLogicMode ?? false,
                 isSocialMode: s.isSocialMode ?? false,
+                isAutoLoop: s.isAutoLoop ?? false,
                 tokenUsage: s.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
             }));
         }
@@ -174,8 +176,8 @@ const App: React.FC = () => {
   // Independent Abort Controllers per Session
   const sessionControllersRef = useRef<Map<string, AbortController>>(new Map());
   
-  // Ref for Social Mode Auto-Drive
-  const socialModeTimerRef = useRef<number | null>(null);
+  // Ref for Auto Loop Auto-Drive
+  const autoLoopTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (sessions.length === 0) {
@@ -198,7 +200,7 @@ const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCollaborationOpen, setIsCollaborationOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isMultimodalOpen, setIsMultimodalOpen] = useState(false); // NEW STATE
+  const [isMultimodalOpen, setIsMultimodalOpen] = useState(false); 
   
   // Selection / Share State
   const [selectionMode, setSelectionMode] = useState(false);
@@ -241,24 +243,28 @@ const App: React.FC = () => {
     }
   }, [inputText]);
 
-  // --- SOCIAL MODE INFINITE LOOP LOGIC ---
+  // --- GLOBAL AUTO LOOP LOGIC (INDEPENDENT) ---
   useEffect(() => {
     // Clear existing timer on any change to prevent duplicates
-    if (socialModeTimerRef.current) {
-        clearTimeout(socialModeTimerRef.current);
-        socialModeTimerRef.current = null;
+    if (autoLoopTimerRef.current) {
+        clearTimeout(autoLoopTimerRef.current);
+        autoLoopTimerRef.current = null;
     }
 
-    // Bug Fix: Check isAutoPlayStopped. If stopped by user, do NOT schedule next round.
-    if (
-        activeSession.isSocialMode && // Now independent per session
-        !activeSession.isProcessing && 
-        activeSession.messages.length > 0 &&
-        !activeSession.isAutoPlayStopped
-    ) {
+    // Loop Condition: 
+    // 1. AutoLoop is ON OR SocialMode is ON (Social Mode implies infinite social interactions)
+    // 2. Not currently processing/generating
+    // 3. Has some history (so the conversation has started)
+    // 4. Not explicitly stopped by user (isAutoPlayStopped)
+    const shouldLoop = (activeSession.isAutoLoop || activeSession.isSocialMode) && 
+                       !activeSession.isProcessing && 
+                       activeSession.messages.length > 0 &&
+                       !activeSession.isAutoPlayStopped;
+
+    if (shouldLoop) {
         const delay = Math.floor(Math.random() * 5000) + 5000; // Random delay 5-10s
         
-        socialModeTimerRef.current = window.setTimeout(() => {
+        autoLoopTimerRef.current = window.setTimeout(() => {
             // Pick a random enabled participant to speak next
             const enabledP = participantsRef.current.filter(p => p.config.enabled && p.id !== activeSession.specialRoleId);
             if (enabledP.length > 0) {
@@ -269,9 +275,9 @@ const App: React.FC = () => {
     }
 
     return () => {
-        if (socialModeTimerRef.current) clearTimeout(socialModeTimerRef.current);
+        if (autoLoopTimerRef.current) clearTimeout(autoLoopTimerRef.current);
     };
-  }, [activeSession.isSocialMode, activeSession.isProcessing, activeSession.messages, activeSessionId, activeSession.isAutoPlayStopped]);
+  }, [activeSession.isAutoLoop, activeSession.isSocialMode, activeSession.isProcessing, activeSession.messages, activeSessionId, activeSession.isAutoPlayStopped]);
 
 
   // Helper to update specific session safely
@@ -477,18 +483,15 @@ const App: React.FC = () => {
     updateSessionById(activeSessionId, { isProcessing: false, currentTurnParticipantId: null, isAutoPlayStopped: true });
 
     // Stop social loop immediate
-    if (socialModeTimerRef.current) {
-        clearTimeout(socialModeTimerRef.current);
-        socialModeTimerRef.current = null;
+    if (autoLoopTimerRef.current) {
+        clearTimeout(autoLoopTimerRef.current);
+        autoLoopTimerRef.current = null;
     }
   };
 
   // --- Core Async Logic ---
   const processPartyRound = async (targetSessionId: string, history: Message[], specificParticipantIds?: string[], forceTriggerJudge: boolean = false) => {
     // ... (generateResponse logic preserved from previous file)
-    // To save XML tokens, I am reusing the logic from previous messages implicitly or I'd paste the full block.
-    // Given the prompt, I must output full content. So I will paste the previous processPartyRound fully.
-    
     updateSessionById(targetSessionId, { isProcessing: true });
     
     const controller = new AbortController();
@@ -1015,6 +1018,17 @@ const App: React.FC = () => {
              </div>
           </div>
           <div className="flex gap-2">
+             {/* Independent Auto Loop Toggle */}
+             <button 
+                title={activeSession.isAutoLoop ? "停止自动循环 (Auto Loop ON)" : "开启自动循环 (Auto Loop OFF)"}
+                onClick={() => updateActiveSession({ isAutoLoop: !activeSession.isAutoLoop, isAutoPlayStopped: false })}
+                className={`p-2 rounded-full transition-colors ${activeSession.isAutoLoop ? 'text-pink-500 bg-pink-50 dark:bg-pink-900/20 animate-pulse' : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-white/10'}`}
+             >
+                <RefreshCw size={20} className={activeSession.isAutoLoop ? 'animate-spin-slow' : ''} />
+             </button>
+
+             <div className="w-px h-6 bg-slate-300 dark:bg-white/20 mx-1 self-center"></div>
+
              <button 
                 title="逻辑模式开关 (STEM/Rational) - 仅当前会话"
                 onClick={() => updateActiveSession({

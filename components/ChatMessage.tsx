@@ -1,5 +1,8 @@
+
 import React, { useMemo, useState, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { Message, Participant } from '../types';
 import { USER_ID } from '../constants';
 import { Bot, User, BrainCircuit, Lock, Clapperboard, ShieldAlert, Gavel, BookOpen, CheckCircle2, Circle, Microscope, ChevronDown, ChevronUp, Clock, Smile, Activity, MapPin } from 'lucide-react';
@@ -26,32 +29,6 @@ interface Token {
   metadata?: any; // For Social Block fields
 }
 
-// Helper to replace common LaTeX commands with Unicode for better raw text display
-const replaceLatexWithUnicode = (text: string): string => {
-    return text
-        .replace(/\\gamma/g, 'γ')
-        .replace(/\\alpha/g, 'α')
-        .replace(/\\beta/g, 'β')
-        .replace(/\\delta/g, 'δ')
-        .replace(/\\theta/g, 'θ')
-        .replace(/\\sigma/g, 'σ')
-        .replace(/\\lambda/g, 'λ')
-        .replace(/\\pi/g, 'π')
-        .replace(/\\times/g, '×')
-        .replace(/\\approx/g, '≈')
-        .replace(/\\neq/g, '≠')
-        .replace(/\\leq/g, '≤')
-        .replace(/\\geq/g, '≥')
-        .replace(/\\rightarrow/g, '→')
-        .replace(/\\leftarrow/g, '←')
-        .replace(/\\infty/g, '∞')
-        .replace(/\\sum/g, '∑')
-        .replace(/\\prod/g, '∏')
-        .replace(/\\int/g, '∫')
-        .replace(/\^2/g, '²')
-        .replace(/\^3/g, '³');
-};
-
 // Robust JSON Parser with Repair Strategies
 const tryParseJson = (str: string): any => {
     let clean = str.trim();
@@ -77,6 +54,15 @@ const tryParseJson = (str: string): any => {
         try { return JSON.parse(fixed + '"]'); } catch (e) {}
     }
     
+    // Strategy 5: Fix Escaped Backslashes for LaTeX (The "Logic Mode" fix)
+    // Sometimes LLMs forget to escape backslashes in LaTeX strings inside JSON.
+    // e.g. "Language": "\frac{a}{b}" -> Invalid JSON. Needs "\\frac{a}{b}".
+    // This is a risky regex replace but helps in many cases.
+    try {
+        const latexFixed = clean.replace(/\\([a-zA-Z]+)/g, '\\\\$1');
+        return JSON.parse(latexFixed);
+    } catch(e) {}
+    
     return null;
 };
 
@@ -85,20 +71,29 @@ const extractSocialFields = (text: string): any => {
     const fields: any = {};
     const keys = ["Virtual Timeline Time", "Language", "Specific Actions", "Facial Expressions", "Psychological State", "Non-specific Actions"];
     
-    // Only attempt if it looks somewhat like the format
-    if (!text.includes("Language") && !text.includes("Specific Actions")) return null;
-
+    // Improved Regex to handle multi-line content (s flag equivalence)
     keys.forEach(key => {
-        // Regex looking for "Key": "Value" allowing for escaped quotes and newlines
-        // We use a non-greedy match for the value until the next quote-comma or end of block
-        const regex = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, 'i'); 
+        // Look for "Key": "Value" or "Key": <json_string>
+        // We capture everything until the next key starts or end of block
+        // This is a heuristic and might be fragile if keys appear in content
+        const regex = new RegExp(`"${key}"\\s*:\\s*"([\\s\\S]*?)"(?=\\s*,\\s*"|\\s*})`, 'i');
         const match = text.match(regex);
         if (match) {
-            fields[key] = match[1];
+            // Unescape escaped quotes if any
+            fields[key] = match[1].replace(/\\"/g, '"');
         }
     });
     
-    // Only return if we found the core Language field or enough evidence
+    // Fallback for Language if it's the main chunk
+    if (!fields["Language"]) {
+        const langMatch = text.match(/"Language"\s*:\s*"([\s\\S]*)/i); // Grab rest if broken
+        if (langMatch) {
+             const val = langMatch[1].trim();
+             // Try to cleanup trailing chars if it looks like end of JSON
+             fields["Language"] = val.replace(/",?\s*[\}\]]*$/, '');
+        }
+    }
+    
     if (fields["Language"] || Object.keys(fields).length >= 2) {
         return fields;
     }
@@ -109,14 +104,12 @@ const parseMessageContent = (text: string): Token[] => {
   const tokens: Token[] = [];
   
   // 1. Aggressive Cleanup of System Hallucinations
-  // Models sometimes output warnings like "!Warning this is not correct..." or "(END DATA...)"
   let cleanText = text
-    .replace(/\n!Warning[\s\S]*$/i, '') // Remove lines starting with !Warning
+    .replace(/\n!Warning[\s\S]*$/i, '') 
     .replace(/\n\(END DATA[\s\S]*$/i, '')
-    .replace(/\nplease adjust[\s\S]*$/i, '')
     .trim();
 
-  // 2. Handle Code Blocks first to protect them
+  // 2. Handle Code Blocks first
   const codeBlockSplit = cleanText.split(/(```[\s\S]*?```)/g);
   
   codeBlockSplit.forEach((segment, index) => {
@@ -126,47 +119,23 @@ const parseMessageContent = (text: string): Token[] => {
           return;
       }
 
-      // 3. Logic Mode Blocks
-      if (segment.includes('[[THOUGHT]]') || segment.includes('[[RESULT]]')) {
-          const logicSplit = segment.split(/(\[\[THOUGHT\]\][\s\S]*?\[\[\/THOUGHT\]\])|(\[\[RESULT\]\][\s\S]*?\[\[\/RESULT\]\])/g);
-          
-          logicSplit.forEach(part => {
-              if (!part) return;
-              if (part.startsWith('[[THOUGHT]]')) {
-                  tokens.push({ type: 'logic_thought', content: part.slice(11, -12).trim() });
-              } else if (part.startsWith('[[RESULT]]')) {
-                  tokens.push({ type: 'logic_result', content: part.slice(10, -11).trim() });
-              } else if (part.trim()) {
-                  tokens.push({ type: 'text', content: part });
-              }
-          });
-          return;
-      }
-      
-      // 4. Unified JSON Detection (Social Mode)
-      // We look for specific keys distinctive to the Unified Output System
+      // 3. Logic Mode / Unified JSON Detection
       const isLikelyUnifiedJson = /"Virtual Timeline Time"|"Psychological State"|"Specific Actions"|"Language"/.test(segment);
       
       if (isLikelyUnifiedJson) {
-         // Try to find the JSON block boundaries
+         // Locate JSON block
          const startIdx = segment.indexOf('{');
-         const endIdx = segment.lastIndexOf('}'); // Try to find the last brace
+         const endIdx = segment.lastIndexOf('}');
          
          if (startIdx !== -1) {
-             // Text before JSON?
              const preText = segment.slice(0, startIdx).trim();
              if (preText) tokens.push({ type: 'text', content: preText });
 
-             // Isolate the candidate JSON string
-             // If endIdx is missing or before startIdx (malformed), take whole string
              let jsonCandidate = (endIdx > startIdx) 
                 ? segment.slice(startIdx, endIdx + 1) 
                 : segment.slice(startIdx);
              
-             // Attempt Parse
              let metadata = tryParseJson(jsonCandidate);
-             
-             // Attempt Fallback Extraction
              if (!metadata) {
                  metadata = extractSocialFields(jsonCandidate);
              }
@@ -175,24 +144,22 @@ const parseMessageContent = (text: string): Token[] => {
                  tokens.push({ type: 'social_block', content: '', metadata });
                  
                  // Handle Text AFTER JSON
-                 // If the JSON was successfully parsed up to endIdx, check if there's trailing content
                  if (endIdx !== -1 && endIdx < segment.length - 1) {
                      const postText = segment.slice(endIdx + 1);
-                     // Remove artifacts like ", }}" or "......"
                      const cleanedPost = postText.replace(/^,?\s*}+/, '').trim();
-                     if (cleanedPost) {
-                         // Only add if it's substantial text, not just punctuation
-                         if (/[a-zA-Z0-9\u4e00-\u9fa5]/.test(cleanedPost)) {
-                             tokens.push({ type: 'text', content: cleanedPost });
-                         }
+                     if (cleanedPost && /[a-zA-Z0-9\u4e00-\u9fa5]/.test(cleanedPost)) {
+                         tokens.push({ type: 'text', content: cleanedPost });
                      }
                  }
-                 return; // Successfully handled this segment as Unified JSON
+                 return; 
              }
          }
       }
 
-      // 5. Regular Legacy Parsing (Thought, Whisper, Action)
+      // 4. Fallback: If JSON parsing failed but it looks like Logic Mode output (LaTeX heavy), treat as text
+      // This prevents the "messy code" look if the JSON structure is broken but content is there.
+      
+      // 5. Regular Legacy Parsing
       const subRegex = /(\[.*?\])|(\{.*?\})|((?<!https?:)\/\/.*?\/\/)/s;
       const subParts = segment.split(subRegex).filter(p => p !== undefined && p !== '');
       
@@ -200,7 +167,6 @@ const parseMessageContent = (text: string): Token[] => {
           if (sub.startsWith('[') && sub.endsWith(']')) {
               tokens.push({ type: 'thought', content: sub.slice(1, -1) });
           } else if (sub.startsWith('{') && sub.endsWith('}')) {
-              // Legacy Whisper
               tokens.push({ type: 'whisper', content: sub.slice(1, -1) });
           } else if (sub.startsWith('//') && sub.endsWith('//') && !sub.includes('http')) {
               tokens.push({ type: 'action', content: sub.slice(2, -2) });
@@ -221,11 +187,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
   const isSystem = message.senderId === 'SYSTEM';
   const tokens = useMemo(() => parseMessageContent(message.content), [message.content]);
   
-  // Optimized Long Press Logic
   const timerRef = useRef<number | null>(null);
   const isScrollingRef = useRef(false);
-  
-  // CoT Collapse State
   const [isCotExpanded, setIsCotExpanded] = useState(false);
 
   const handleTouchStart = () => {
@@ -278,7 +241,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
               <div className="bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 shadow-sm max-w-full overflow-hidden">
                   <ShieldAlert size={16} className="shrink-0" />
                   <div className="truncate text-wrap break-words">
-                    <ReactMarkdown>{message.content}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                      {message.content}
+                    </ReactMarkdown>
                   </div>
               </div>
           </div>
@@ -300,7 +265,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
       onContextMenu={handleContextMenu}
       onClick={handleClick}
     >
-      {/* Selection Checkbox Overlay */}
       {selectionMode && (
          <div className={`
            absolute top-6 z-20 transition-all duration-300
@@ -315,13 +279,12 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
       )}
 
       <div className={`
-        flex max-w-[85%] md:max-w-[85%] gap-2 md:gap-4 
+        flex max-w-[90%] md:max-w-[85%] gap-2 md:gap-4 
         ${isUser ? 'flex-row-reverse' : 'flex-row'}
         ${selectionMode && !isSelected ? 'opacity-50 grayscale scale-95' : 'scale-100'}
         transition-all duration-300
       `}>
         
-        {/* Avatar */}
         <div className="flex-shrink-0 mt-1 flex flex-col items-center gap-1">
           {isUser ? (
             <div className="w-8 h-8 md:w-10 md:h-10 rounded-full bg-slate-800 flex items-center justify-center text-white shadow-md ring-2 ring-white dark:ring-slate-700">
@@ -356,7 +319,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
           )}
         </div>
 
-        {/* Bubble Container */}
         <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 flex-1 max-w-full`}>
           {!isUser && (
             <div className="flex items-center gap-2 mb-1 ml-1">
@@ -372,7 +334,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             </div>
           )}
 
-          {/* Image Attachments */}
           {message.images && message.images.length > 0 && (
              <div className="mb-2 flex flex-wrap gap-2 justify-end">
                {message.images.map((img, idx) => (
@@ -387,7 +348,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
              </div>
           )}
           
-          {/* Text Content */}
           <div className={`space-y-1.5 w-full ${isUser ? 'flex flex-col items-end' : ''}`}>
              {message.isError ? (
                <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl text-sm">
@@ -396,26 +356,27 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
              ) : (
                tokens.map((token, index) => {
                  if (token.type === 'social_block') {
-                    // --- SOCIAL MODE CARD (NOW UNIFIED FORMAT) ---
+                    // --- SOCIAL / LOGIC MODE CARD ---
                     const m = token.metadata || {};
+                    // Logic mode usually has long Language content with headers and math.
                     return (
-                        <div key={index} className="bg-white dark:bg-[#151516] border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xl w-full max-w-lg mb-2 relative overflow-hidden group/card hover:shadow-2xl transition-all">
-                            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover/card:opacity-20 transition-opacity">
+                        <div key={index} className="bg-white dark:bg-[#151516] border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xl w-full max-w-2xl mb-2 relative overflow-hidden group/card hover:shadow-2xl transition-all">
+                            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover/card:opacity-20 transition-opacity pointer-events-none">
                                 <Activity size={80} />
                             </div>
                             
-                            {/* Time & State */}
                             <div className="flex items-center gap-2 mb-4 text-xs font-mono text-slate-400">
                                 <Clock size={12} />
                                 <span>{m['Virtual Timeline Time'] || 'Unknown Time'}</span>
                             </div>
 
-                            {/* Main Speech */}
-                            <div className="mb-4 text-slate-800 dark:text-slate-100 text-base md:text-lg font-medium leading-relaxed">
-                                "{m['Language']}"
+                            {/* Main Content Area - Supports LaTeX */}
+                            <div className="mb-4 text-slate-800 dark:text-slate-100 text-base md:text-lg font-medium leading-relaxed markdown-body">
+                                <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                  {m['Language'] || ''}
+                                </ReactMarkdown>
                             </div>
 
-                            {/* Actions & Expressions */}
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
                                 {m['Specific Actions'] && (
                                     <div className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/10 p-2 rounded-xl">
@@ -431,7 +392,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                 )}
                             </div>
 
-                            {/* Inner Thoughts & Macro Actions */}
                             <div className="space-y-2">
                                 {m['Psychological State'] && (
                                     <div className="flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400 italic">
@@ -450,7 +410,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                     );
                  }
                  else if (token.type === 'logic_thought') {
-                    // --- CHAIN OF THOUGHT ---
+                    // --- CHAIN OF THOUGHT (Legacy) ---
                     return (
                         <div key={index} className="relative max-w-full w-full mb-2">
                             <button 
@@ -459,7 +419,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                             >
                                 <Microscope size={16} className="text-cyan-600 dark:text-cyan-400" />
                                 <span className="text-xs font-bold text-cyan-700 dark:text-cyan-300 uppercase tracking-wider flex-1 text-left">
-                                    Chain of Thought (思维链验证)
+                                    Chain of Thought
                                 </span>
                                 {isCotExpanded ? <ChevronUp size={16} className="text-cyan-500"/> : <ChevronDown size={16} className="text-cyan-500"/>}
                             </button>
@@ -468,13 +428,15 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                 ${isCotExpanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0'}
                             `}>
                                 <div className="p-4 text-xs md:text-sm font-mono text-slate-600 dark:text-slate-300 whitespace-pre-wrap">
-                                    {replaceLatexWithUnicode(token.content)}
+                                    <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                        {token.content}
+                                    </ReactMarkdown>
                                 </div>
                             </div>
                         </div>
                     );
-                 } else if (token.type === 'logic_result' || (token.type === 'text' && !token.content.trim().startsWith('['))) {
-                   // --- FORMAL RESULT / STANDARD TEXT ---
+                 } else if (token.type === 'text') {
+                   // --- STANDARD TEXT / FALLBACK ---
                    if (!token.content.trim()) return null;
                    
                    const bubbleStyle = isUser 
@@ -489,35 +451,38 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                         ${bubbleStyle}
                      `}>
                         <div className={`markdown-body break-words overflow-hidden w-full ${isUser ? 'text-white' : ''}`}>
-                          <ReactMarkdown>{replaceLatexWithUnicode(token.content)}</ReactMarkdown>
+                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                             {token.content}
+                          </ReactMarkdown>
                         </div>
                      </div>
                    );
                  } else if (token.type === 'thought') {
-                   // Legacy Thought
                    return (
                      <div key={index} className="relative max-w-full bg-slate-100 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs md:text-sm px-3 py-2 md:px-4 md:py-2 rounded-2xl italic flex items-start gap-2 backdrop-blur-sm">
                        <BrainCircuit size={14} className="mt-1 shrink-0 opacity-70" />
                        <div className="markdown-body opacity-90 break-words overflow-hidden w-full">
-                         <ReactMarkdown>{token.content}</ReactMarkdown>
+                         <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                            {token.content}
+                         </ReactMarkdown>
                        </div>
                      </div>
                    );
                  } else if (token.type === 'whisper') {
-                   // Legacy Whisper
                    return (
                      <div key={index} className="relative max-w-full bg-purple-50 dark:bg-purple-900/10 border border-purple-200 dark:border-purple-800/30 text-purple-800 dark:text-purple-300 text-xs md:text-sm px-3 py-2 md:px-4 md:py-2 rounded-2xl flex items-start gap-2 shadow-inner">
                        <Lock size={14} className="mt-1 shrink-0 opacity-70" />
                        <div className="w-full overflow-hidden">
                          <div className="text-[10px] font-bold uppercase tracking-wider opacity-50 mb-0.5">Secret</div>
                          <div className="markdown-body break-words">
-                             <ReactMarkdown>{token.content}</ReactMarkdown>
+                             <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                                {token.content}
+                             </ReactMarkdown>
                          </div>
                        </div>
                      </div>
                    );
                  } else if (token.type === 'action') {
-                   // Legacy Action
                    return (
                      <div key={index} className="inline-flex items-center gap-2 text-amber-600 dark:text-amber-400 text-xs md:text-sm font-bold italic px-2 py-1 max-w-full overflow-hidden">
                        <Clapperboard size={14} className="shrink-0" />

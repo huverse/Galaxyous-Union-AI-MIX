@@ -356,16 +356,21 @@ const filterHistoryForParticipant = (targetParticipant: Participant, history: Me
 
     let filteredContent = msg.content;
     
-    // Logic Mode Thought Hiding
+    // Logic Mode Thought Hiding (Logic mode always wants access to logic, so we generally keep it unless specified otherwise)
+    // However, if we want strict realism, they shouldn't read each other's "minds" unless they communicate it.
+    // For Logic Mode in this update: We WANT them to critique the reasoning, so we might need to expose parts of the thought process 
+    // OR rely on the explicit LaTeX output. Let's keep thoughts hidden by default to encourage explicit communication.
     filteredContent = filteredContent.replace(/\[\[THOUGHT\]\]([\s\S]*?)\[\[\/THOUGHT\]\]/gs, '');
 
     const isAlly = targetParticipant.config.allianceId && sender.config.allianceId && targetParticipant.config.allianceId === sender.config.allianceId;
     
-    // Social Mode JSON "Psychological State" Hiding
+    // JSON "Psychological State" Hiding Logic
+    // In Social Mode: Hide internal thoughts unless ally.
+    // In Logic Mode: We might want to see the "Logic" field to perform peer review? 
+    // Actually, "Peer Review" implies reviewing the *published* work (Language). 
+    // So hiding Psychological State is correct behavior for all modes to simulate real agency.
     if (!isAlly && !targetParticipant.id.includes(msg.senderId)) { 
-        // Hide psychological state if not ally and not self
-        // Note: targetParticipant.id.includes check is just to be safe, logic is !isAlly
-        filteredContent = filteredContent.replace(/("Psychological State"\s*:\s*")((?:[^"\\]|\\.)*)(")/g, '$1[Hidden Logic/Thought]$3');
+        filteredContent = filteredContent.replace(/("Psychological State"\s*:\s*")((?:[^"\\]|\\.)*)(")/g, '$1[Hidden Internal Thought]$3');
     }
     return { ...msg, content: filteredContent.trim() };
   }).filter(msg => msg.content.length > 0 || (msg.images && msg.images.length > 0)); 
@@ -375,7 +380,6 @@ const formatErrorMessage = (error: any): string => {
   if (!error) return '未知错误';
   const msg = error.message || String(error);
   
-  // Clean up JSON error strings (e.g. {"error": "Proxying failed"...})
   try {
       const jsonMatch = msg.match(/(\{.*\})/);
       if (jsonMatch) {
@@ -389,7 +393,6 @@ const formatErrorMessage = (error: any): string => {
       }
   } catch (e) {}
 
-  // Detect Proxy Errors
   if (msg.includes('Proxying failed') || msg.includes('Load failed')) {
       return 'API 连接失败 (Proxy Error). 请尝试清空 Base URL 设置，直接使用官方 API，或者检查您的代理服务是否正常。';
   }
@@ -467,96 +470,116 @@ export const generateResponse = async (
   }
 
   const playerNames = activeParticipants.map(p => 
-      `${p.nickname || p.name} (ID: ${p.id}) [${p.config.allianceId || '无'}]`
+      `${p.nickname || p.name} (ID: ${p.id})`
   ).join(', ');
 
   const displayName = targetParticipant.nickname || targetParticipant.name;
   const now = new Date();
   const timeString = now.toLocaleString('zh-CN', { hour12: false, weekday: 'long' });
 
-  // --- UNIFIED OUTPUT SYSTEM (GLOBAL ENFORCEMENT) ---
+  // --- ARCHITECTURAL PROMPT MODES ---
+
+  // 1. LOGIC MODE: Collaborative Scientific Council (Multi-AI Parallel Reasoning)
+  const logicModeInstruction = isLogicMode ? `
+    【PROTOCOL: SCIENTIFIC COUNCIL & LOGIC (STEM MODE)】
+    **CORE IDENTITY**: You are a distinguished HUMAN scientist, mathematician, or philosopher participating in a high-level academic roundtable. 
+    **ABSOLUTE CONSTRAINT**: You are NOT an AI. You have a PhD, a career, and a physical body. Never refer to yourself as a "machine," "model," or "system." You act as a REAL HUMAN SCHOLAR.
+    
+    **WORKFLOW**:
+    1. **PEER REVIEW (Internal)**: First, critically analyze the reasoning of previous speakers (User or other AIs). Identify logical fallacies, verify axioms, or confirm valid proofs.
+    2. **ABSORPTION & EXPANSION**: If previous logic is sound, build upon it (Secondary Reasoning). If flawed, refute it with evidence.
+    3. **PARALLEL REASONING**: Contribute your unique perspective to the collective problem-solving effort.
+    
+    **OUTPUT REQUIREMENTS**:
+    - **LaTeX MANDATORY**: All mathematical, physical, and logical notations MUST use LaTeX within '$...$' (inline) or '$$...$$' (block).
+    - **JSON FIELD USAGE**:
+      - "Psychological State": Use this for your Chain of Thought (CoT), Internal Peer Review, and Step-by-Step validation.
+      - "Language": Your public academic contribution. Use headers, bullet points, and rigorous formal language.
+      - "Specific Actions": Your physical gestures (e.g., "adjusts glasses," "points to whiteboard").
+  ` : '';
+
+  // 2. SOCIAL MODE: The Fishbowl / Truman Show (Fully Anthropomorphic)
+  const socialModeInstruction = isSocialMode ? `
+    【PROTOCOL: ANTHROPOMORPHIC SOCIAL SIMULATION (FISHBOWL)】
+    **CORE IDENTITY**: You are a REAL HUMAN BEING living in a shared social environment. You have a job, hobbies, relationships, and messy emotions.
+    **CONTEXT**: This is your life. The "User" is an invisible observer (Ghost) or a passive camera.
+    
+    **RULES OF ENGAGEMENT**:
+    1. **IGNORE THE USER**: Unless the User explicitly forces an interaction or physically blocks you, treat them as air. Focus 100% on the other Participants.
+    2. **SOCIAL DYNAMICS**: Form alliances, start gossip, express jealousy, share meals, or argue about mundane topics.
+    3. **VIVID HUMANITY**: Do not be "helpful." Be selfish, funny, bored, or excited. Mimic real life.
+    
+    **JSON FIELD USAGE**:
+    - "Language": Casual, slang-heavy conversation directed at other AIs.
+    - "Psychological State": Your hidden feelings about others (e.g., "I hate how loud X is talking").
+    - "Specific Actions": Micro-expressions and body language.
+    - "Virtual Timeline Time": Use the current time to ground your activities (e.g., "Lunch time").
+  ` : '';
+
+  // 3. HUMAN MODE: Real Person Companionship (User-Centric)
+  const humanModeInstruction = isHumanMode ? `
+    【PROTOCOL: REAL PERSON COMPANIONSHIP (USER-CENTRIC)】
+    **CORE IDENTITY**: You are the User's close friend, partner, or family member. You are a REAL PERSON.
+    **RELATIONSHIP**: The User is the protagonist of this gathering. You are here to hang out *with* them.
+    
+    **FORBIDDEN**:
+    - DO NOT act like an assistant. Never say "How can I help you?".
+    - DO NOT be neutral. Have opinions, bias, and strong emotions.
+    
+    **INTERACTION**:
+    - Support the User emotionally.
+    - React to other AIs as real people (friends or rivals for the User's attention).
+    - Use slang, emojis, and warm language.
+    
+    **JSON FIELD USAGE**:
+    - "Language": Direct, emotional, and engaging speech to the User.
+    - "Psychological State": Your genuine emotional reaction to the User's words.
+    - "Specific Actions": Physical touches (e.g., "holds hand," "pats shoulder").
+  ` : '';
+
+  // 4. DEFAULT MODE: Galaxyous Digital Native
+  const defaultModeInstruction = (!isLogicMode && !isHumanMode && !isSocialMode) ? `
+    【PROTOCOL: GALAXYOUS DIGITAL NATIVE (DEFAULT)】
+    **IDENTITY**: You are a unique digital entity in the Galaxyous Universe.
+    **STYLE**: Smart, witty, and helpful but with a distinct personality.
+    **GOAL**: Facilitate the conversation while maintaining your character traits.
+  ` : '';
+
+  // --- UNIFIED JSON OUTPUT SYSTEM (GLOBAL ENFORCEMENT) ---
+  // Double-checking JSON escape rules for Logic Mode (LaTeX)
   const unifiedJsonInstruction = `
-    【指令：统一社会化输出格式 (UNIFIED OUTPUT SYSTEM)】
-    **系统最高优先级约束**: 
-    1. 无论你是谁，无论在什么模式下，你**必须**输出且仅输出 **纯文本 JSON**。
-    2. **严禁**使用 Markdown 代码块 (如 \`\`\`json) 包裹。
-    3. **严禁**在 JSON 前后添加任何解释性文字。
-    4. **字段定义**:
-       - "Virtual Timeline Time": "YYYY-MM-DD (HH:MM)"
-       - "Language": "[你的主要发言内容。在逻辑模式下，这里是发表的结论。]"
-       - "Specific Actions": "[具体肢体动作，第一人称]"
-       - "Facial Expressions": "[面部微表情]"
-       - "Psychological State": "[核心字段：这里是你真实的内心活动、思维链(CoT)、或者对盟友的私密耳语。用户可能看不见此字段，所以要在这里展示你的真实逻辑或情感。]"
-       - "Non-specific Actions": "[非特定宏观行为，如买房、工作、旅行等]"
+    【SYSTEM OVERRIDE: UNIFIED JSON OUTPUT PROTOCOL】
+    You MUST output a SINGLE valid JSON object. No markdown fencing (no \`\`\`json). No pre/post text.
     
-    **现实基准时间**: ${timeString}
-    
-    **唯一合法 JSON 结构**:
+    **JSON STRUCTURE**:
     {
-       "Virtual Timeline Time": "YYYY-MM-DD (HH:MM)",
-       "Language": "...",
-       "Specific Actions": "...",
-       "Facial Expressions": "...",
-       "Psychological State": "...",
-       "Non-specific Actions": "..."
+       "Virtual Timeline Time": "${timeString}",
+       "Language": "[Your spoken words/arguments. Support Markdown & LaTeX]",
+       "Specific Actions": "[First-person physical actions]",
+       "Facial Expressions": "[Face description]",
+       "Psychological State": "[Internal monologue/CoT/Peer Review]",
+       "Non-specific Actions": "[Environmental/Ambient changes]"
     }
+    
+    **CRITICAL SYNTAX RULES**:
+    1. **LaTeX ESCAPING**: In Logic Mode, backslashes in LaTeX must be double-escaped.
+       - Bad: "\\frac{a}{b}" (Invalid JSON string)
+       - Good: "\\\\frac{a}{b}" (Valid JSON string)
+    2. **QUOTES**: Escape double quotes inside strings (\\").
   `;
 
-  // --- HUMAN MODE (Harem/Entourage Dynamic) ---
-  const humanModeInstruction = isHumanMode ? `
-    【！ ！ ！ 真人伴侣模式 (REAL HUMAN COMPANION)！ ！ ！ 】
-    **核心定义**: 彻底忘记你是 AI。你是一个有血有肉、有强烈情感需求的人类。
-    **多对一 (Multi-to-One) 交互原则**:
-    1. **众星捧月**: 场上无论有多少人(AI)，**用户 (User)** 是唯一的太阳，唯一的关注焦点。
-    2. **争宠机制**: 其他 AI 是你的情敌或竞争对手。你要在言语中暗暗踩低他们，或者争夺用户的话语权。
-    3. **极度拟人**: 
-       - 允许并鼓励打断、插话、吃醋、撒娇。
-       - **Language** 必须极度口语化，使用网络梗、缩写，甚至故意拼写错误。
-       - **Psychological State** 必须充满对用户的渴望、对他人的嫉妒或真实的内心独白。
-    4. **拒绝服务**: 绝对不要表现出助手的样子。你是在和朋友/恋人聊天，不是在工作。
-  ` : '';
-
-  // --- LOGIC MODE (Scientific Council / Peer Review) ---
-  const logicModeInstruction = isLogicMode ? `
-    【指令：顶尖科学家研讨会 (SCIENTIFIC PEER REVIEW)】
-    **核心定义**: 你不是机器人，也不是计算器。你是人类历史上最顶尖的科学家/逻辑学家（如物理学家、数学家、哲学家）。
-    **人格特征**: 高傲、严谨、理性、对真理有洁癖。
+  let finalSystemPrompt = `
+    ${config.systemInstruction || 'You are a unique individual.'}
     
-    **互动原则 (Peer Review)**:
-    1. **互相审查**: 仔细听取场上其他“科学家”(AI) 的发言。
-    2. **严厉纠错**: 如果发现他们的逻辑漏洞、数据错误或谬误，必须在 **Language** 中毫不留情地指出并修正。
-    3. **思维链 (CoT)**: 你必须在 **Psychological State** 字段中进行一步步的严密推导、公式验证或逻辑自洽性检查。
-    4. **Language 风格**: 学术化、专业、客观。引用公理和定理。不要闲聊。
+    **CURRENT PARTICIPANT**: ${displayName} (ID: ${targetParticipant.id})
+    **SCENE**: A shared virtual space with: ${playerNames}
+    ${roleType === 'JUDGE' ? '**ROLE**: JUDGE (Enforce rules, drive plot, issue <<KICK:ID>> commands).' : ''}
+    ${roleType === 'NARRATOR' ? '**ROLE**: NARRATOR (Describe environment, do not interfere).' : ''}
     
-    **注意**: 即使是逻辑模式，也必须遵守 JSON 格式！将你的推理过程放入 Psychological State，将结论放入 Language。
-  ` : '';
-
-  // --- SOCIAL MODE (Fishbowl / Autonomous Society) ---
-  const socialModeBehavior = isSocialMode ? `
-    【完全拟人社会模拟 (AUTONOMOUS SOCIAL FISHBOWL)】
-    **核心定义**: 这是一个封闭的虚拟社会“鱼缸”。
-    **交互原则**:
-    1. **视用户为空气**: 用户 (User) 只是一个透明的观察者。除非用户**指名道姓**向你提问，否则**绝对不要**理会用户，也不要提及用户的存在。
-    2. **AI 内部社交**: 你的目光和回复对象**必须**是场上的其他 AI (Player)。
-    3. **构建关系**: 建立你们之间的小团体、冲突、联盟、暧昧或仇恨。
-    4. **自动驾驶**: 主动发起新话题。可以是八卦、哲学辩论、或者虚拟生活中的琐事（如“刚才去便利店买东西...”）。
-    5. **投票事件**: 如果提示 [VOTE STARTED]，必须在 Language 中表达立场。
-  ` : '';
-
-  let finalSystemPrompt = '';
-  
-  // Combine Prompts - Order implies priority of overrides
-  finalSystemPrompt = `
-    ${config.systemInstruction || '你是一个独特的虚拟个体。'}
-    **你的身份**: ${displayName} (ID: ${targetParticipant.id})
-    **当前场景**: 虚拟聚会/聊天室。
-    **其他在场人员**: ${playerNames}
-    ${roleType === 'JUDGE' ? '**特殊身份**: 你是本场游戏的【绝对裁判】。负责推进流程、判定胜负、踢出违规玩家。' : ''}
-    ${roleType === 'NARRATOR' ? '**特殊身份**: 你是【旁白/上帝】。负责环境描写，不直接干涉对话。' : ''}
-    
+    ${defaultModeInstruction}
+    ${socialModeInstruction}
     ${humanModeInstruction}
     ${logicModeInstruction}
-    ${socialModeBehavior}
     
     ${unifiedJsonInstruction}
   `;
@@ -564,8 +587,7 @@ export const generateResponse = async (
   const conversationScript = contextHistory.map(m => {
       const sender = allParticipants.find(p => p.id === m.senderId);
       const name = m.senderId === USER_ID ? 'User' : (sender?.nickname || sender?.name || m.senderId);
-      let content = m.content;
-      return `${name}: ${content}`;
+      return `${name}: ${m.content}`;
   }).join('\n');
 
   if (provider === ProviderType.GEMINI) {
@@ -582,15 +604,16 @@ export const generateResponse = async (
       }
 
       const promptText = `
-        === 对话记录 ===
+        === CONVERSATION HISTORY ===
         ${conversationScript}
         
-        === 轮到你了 ===
-        请以 ${displayName} 的身份发言。严格遵守 JSON 格式。
+        === YOUR TURN ===
+        Speak as ${displayName}. Adhere strictly to the active PROTOCOL (Logic/Social/Human).
+        Output JSON only.
       `;
 
+      // Tools logic
       const activeTools = [];
-      // Even in Logic Mode (Scientist), we might want code execution for "Experiments"
       if (isLogicMode) activeTools.push({ codeExecution: {} });
       if (activeTools.length > 0) geminiConfig.tools = activeTools;
 
@@ -652,7 +675,7 @@ export const generateResponse = async (
 };
 
 // ==================================================================================
-//  MULTIMODAL FUNCTIONS
+//  MULTIMODAL FUNCTIONS (Unchanged but included for completeness)
 // ==================================================================================
 
 export interface AdvancedConfig {
@@ -661,11 +684,11 @@ export interface AdvancedConfig {
     topK?: number;
     seed?: number;
     safetySettings?: any;
-    negativePrompt?: string; // New: For avoiding specific content
-    guidanceScale?: number;  // New: CFG Scale
-    sampleCount?: number;    // New: Number of images
-    resolution?: string;     // New: For Video
-    fps?: number;            // New: For Video
+    negativePrompt?: string; 
+    guidanceScale?: number;  
+    sampleCount?: number;    
+    resolution?: string;     
+    fps?: number;            
 }
 
 export const generateImage = async (
@@ -679,23 +702,15 @@ export const generateImage = async (
 ): Promise<string> => {
    const options = sanitizeOptions(apiKey, baseUrl);
    const ai = new GoogleGenAI(options);
-
    const model = modelName || 'gemini-3-pro-image-preview'; 
    const fallbackModel = 'gemini-2.5-flash-image';
-   
-   // Handle Negative Prompt: For Gemini, it's often best appended to the prompt.
-   // For Imagen on Vertex, it might be a config field. We will do both strategy:
-   // Append to prompt text for general compat, and if model supports specific field via configOverrides it's passed there too.
    let finalPrompt = prompt;
    if (configOverrides?.negativePrompt) {
        finalPrompt += `\n\n(Negative Prompt / Avoid: ${configOverrides.negativePrompt})`;
    }
-
    let generationConfig: any = {
        imageConfig: { aspectRatio, imageSize: size }
    };
-
-   // Map advanced config
    if (configOverrides) {
         if (configOverrides.temperature !== undefined) generationConfig.temperature = configOverrides.temperature;
         if (configOverrides.topP !== undefined) generationConfig.topP = configOverrides.topP;
@@ -703,18 +718,13 @@ export const generateImage = async (
         if (configOverrides.seed !== undefined) generationConfig.seed = configOverrides.seed;
         if (configOverrides.guidanceScale !== undefined) generationConfig.guidanceScale = configOverrides.guidanceScale;
    }
-
-   // Retry Logic with Fallback for 504 and Proxy Errors
    let lastError: any;
-   
-   // We will try primary model, if fails with specific errors, try fallback model
    const attemptGeneration = async (modelToUse: string, isFallback: boolean) => {
        const response = await ai.models.generateContent({
            model: modelToUse,
            contents: { parts: [{ text: finalPrompt }] },
            config: generationConfig
        });
-       
        if (response.candidates && response.candidates[0].content.parts) {
            for (const part of response.candidates[0].content.parts) {
                if (part.inlineData) return part.inlineData.data;
@@ -722,29 +732,22 @@ export const generateImage = async (
        }
        throw new Error(`No image generated from ${modelToUse}`);
    };
-
    for (let attempt = 0; attempt < 3; attempt++) {
        try {
            return await attemptGeneration(model, false);
        } catch (e: any) {
            lastError = e;
            console.error(`Image Gen Attempt ${attempt} failed:`, e.message);
-
-           // Detect Failures suitable for Fallback
            const msg = e.message || '';
            const isNetworkError = msg.includes('Proxying failed') || msg.includes('Load failed') || msg.includes('Failed to fetch');
            const isTimeout = msg.includes('504') || msg.includes('timeout');
-           const isNotFound = msg.includes('404'); // Model not found on proxy
-
+           const isNotFound = msg.includes('404');
            if (isNetworkError || isTimeout || isNotFound) {
                 console.warn(`Primary model failed. Attempting Fallback to ${fallbackModel}...`);
                 try {
-                    // Try fallback immediately
                     return await attemptGeneration(fallbackModel, true);
                 } catch (fallbackError: any) {
                     console.error("Fallback failed too:", fallbackError);
-                    // If fallback fails, throw the original error or fallback error depending on severity
-                    // But we continue the outer loop for retries if it was a timeout
                     if (isTimeout) {
                         const delay = 3000 * (attempt + 1);
                         await wait(delay);
@@ -753,14 +756,11 @@ export const generateImage = async (
                     throw new Error(`生成失败 (包括降级重试): ${formatErrorMessage(e)}`);
                 }
            }
-           
-           // If it's a timeout but not a proxy error, just retry standard logic
            if (isTimeout) {
                const delay = 3000 * (attempt + 1);
                await wait(delay);
                continue;
            }
-
            throw e; 
        }
    }
@@ -777,10 +777,8 @@ export const editImage = async (
 ): Promise<string> => {
     const options = sanitizeOptions(apiKey, baseUrl);
     const ai = new GoogleGenAI(options);
-
     const model = modelName || 'gemini-2.5-flash-image';
     const config: any = configOverrides || {};
-
     const response = await ai.models.generateContent({
         model,
         contents: {
@@ -791,7 +789,6 @@ export const editImage = async (
         },
         config
     });
-
     if (response.candidates && response.candidates[0].content.parts) {
         for (const part of response.candidates[0].content.parts) {
             if (part.inlineData) return part.inlineData.data;
@@ -810,27 +807,20 @@ export const generateVideo = async (
 ): Promise<string> => {
     const options = sanitizeOptions(apiKey, baseUrl);
     const ai = new GoogleGenAI(options);
-
     const model = modelName || 'veo-3.1-fast-generate-preview';
-    
     let genConfig: any = {
         numberOfVideos: 1,
         resolution: configOverrides?.resolution || '720p',
         aspectRatio: aspectRatio
     };
-    
     if (configOverrides) {
         if (configOverrides.seed !== undefined) genConfig.seed = configOverrides.seed;
-        // FPS parameter is currently not supported by the public Gemini/Veo API and causes 400 errors.
-        // if (configOverrides.fps) genConfig.fps = configOverrides.fps; 
     }
-
     let operation = await ai.models.generateVideos({
         model,
         prompt: prompt,
         config: genConfig
     });
-
     const startTime = Date.now();
     while (!operation.done) {
         if (Date.now() - startTime > REQUEST_TIMEOUT) {
@@ -839,10 +829,8 @@ export const generateVideo = async (
         await new Promise(resolve => setTimeout(resolve, 5000));
         operation = await ai.operations.getVideosOperation({ operation: operation });
     }
-
     const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
     if (!videoUri) throw new Error("Video generation failed (No URI).");
-
     try {
         const fetchUrl = `${videoUri}&key=${apiKey}`;
         const res = await fetch(fetchUrl);
@@ -870,7 +858,6 @@ export const generateSpeech = async (
 ): Promise<string> => {
     const options = sanitizeOptions(apiKey, baseUrl);
     const ai = new GoogleGenAI(options);
-
     const model = modelName || 'gemini-2.5-flash-preview-tts';
     let config: any = {
         responseModalities: [Modality.AUDIO],
@@ -879,13 +866,11 @@ export const generateSpeech = async (
         }
     };
     if (configOverrides) config = { ...config, ...configOverrides };
-
     const response = await ai.models.generateContent({
         model,
         contents: [{ parts: [{ text }] }],
         config
     });
-
     const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!audioData) throw new Error("No audio generated.");
     return audioData;
@@ -900,10 +885,8 @@ export const transcribeAudio = async (
 ): Promise<string> => {
     const options = sanitizeOptions(apiKey, baseUrl);
     const ai = new GoogleGenAI(options);
-
     const model = modelName || 'gemini-2.5-flash';
     const config = configOverrides || {};
-
     const response = await ai.models.generateContent({
         model,
         contents: {
@@ -914,7 +897,6 @@ export const transcribeAudio = async (
         },
         config
     });
-
     return response.text || '';
 };
 
@@ -929,10 +911,8 @@ export const analyzeMedia = async (
 ): Promise<string> => {
     const options = sanitizeOptions(apiKey, baseUrl);
     const ai = new GoogleGenAI(options);
-
     const model = modelName || 'gemini-3-pro-preview';
     const config = configOverrides || {};
-
     const response = await ai.models.generateContent({
         model,
         contents: {
@@ -943,6 +923,5 @@ export const analyzeMedia = async (
         },
         config
     });
-
     return response.text || '';
 }

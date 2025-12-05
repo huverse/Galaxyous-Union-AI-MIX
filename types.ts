@@ -77,8 +77,9 @@ export interface Session {
   isProcessing: boolean;
   currentTurnParticipantId: string | null;
   isAutoPlayStopped?: boolean; // Prevents auto-drive from resuming after stop
+  isAutoLoop?: boolean; // Controls whether the session loops automatically
 
-  // Independent Mode Flags (Previously Global ChatState)
+  // Independent Mode Flags
   isDeepThinking: boolean; 
   isHumanMode: boolean; 
   isLogicMode: boolean; 
