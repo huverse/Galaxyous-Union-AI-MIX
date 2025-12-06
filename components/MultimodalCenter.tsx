@@ -1,21 +1,22 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Participant, ProviderType } from '../types';
-import { X, Image as ImageIcon, Video, Mic, MessageSquare, Loader2, Wand2, Download, Upload, Play, Film, Type, Music, Sparkles, CheckCircle2, Terminal, History, RefreshCcw, Settings2, ChevronDown, ChevronUp, StopCircle, Wifi, Volume2, ThermometerSun, Zap, Hash, Shield, Layers, Sliders, Settings, Plus, Trash2, FileJson, ArrowDownToLine, ArrowUpFromLine, ExternalLink } from 'lucide-react';
+import { X, Image as ImageIcon, Video, Mic, MessageSquare, Loader2, Wand2, Download, Upload, Play, Film, Type, Music, Sparkles, CheckCircle2, Terminal, History, RefreshCcw, Settings2, ChevronDown, ChevronUp, StopCircle, Wifi, Volume2, ThermometerSun, Zap, Hash, Shield, Layers, Sliders, Settings, Plus, Trash2, FileJson, ArrowDownToLine, ArrowUpFromLine, ExternalLink, Globe } from 'lucide-react';
 import { generateImage, generateVideo, generateSpeech, transcribeAudio, analyzeMedia, editImage, URI_PREFIX, LiveSessionManager } from '../services/aiService';
 
 interface MultimodalCenterProps {
   isOpen: boolean;
   onClose: () => void;
-  participants: Participant[]; // Still passed for Live API fallback if needed
+  participants: Participant[]; 
 }
 
 type TabId = 'IMAGE' | 'VIDEO' | 'AUDIO' | 'ANALYSIS' | 'LIVE' | 'HISTORY';
 
-// Independent Config for Multimodal Center
 interface MultimodalConfig {
+    provider: ProviderType; // NEW: Provider selector
     apiKey: string;
     baseUrl: string;
+    modelName: string;      // NEW: Default Model Override
     customModels: string[]; 
 }
 
@@ -24,22 +25,20 @@ interface TabState {
     isProcessing: boolean;
     result: any | null;
     error: string | null;
-    // Basic Configs
     imgSize: '1K'|'2K'|'4K';
     aspectRatio: string;
     voiceName: string;
     refImage: string | null;
-    // Advanced Configs
     customModel: string;
     temperature: number;
     topP: number;
     seed: number;
     safetyLevel: 'BLOCK_NONE' | 'BLOCK_SOME' | 'BLOCK_MOST';
-    negativePrompt: string; // New
-    guidanceScale: number;  // New (CFG)
-    sampleCount: number;    // New (Batch)
-    resolution: string;     // New (Video)
-    fps: number;            // New (Video)
+    negativePrompt: string; 
+    guidanceScale: number;  
+    sampleCount: number;    
+    resolution: string;     
+    fps: number;            
 }
 
 interface HistoryItem {
@@ -48,7 +47,6 @@ interface HistoryItem {
     data: string;
     prompt: string;
     timestamp: number;
-    thumbnail?: string; 
 }
 
 const initialTabData: TabState = {
@@ -73,10 +71,10 @@ const initialTabData: TabState = {
 };
 
 const DEFAULT_MODELS = {
-    IMAGE: ['gemini-3-pro-image-preview', 'gemini-2.5-flash-image', 'imagen-3.0-generate-001'],
+    IMAGE: ['gemini-3-pro-image-preview', 'gemini-2.5-flash-image', 'imagen-3.0-generate-001', 'dall-e-3'],
     VIDEO: ['veo-3.1-fast-generate-preview', 'veo-3.1-generate-preview'],
-    AUDIO: ['gemini-2.5-flash-preview-tts', 'gemini-2.5-flash'],
-    ANALYSIS: ['gemini-3-pro-preview', 'gemini-2.5-flash'],
+    AUDIO: ['gemini-2.5-flash-preview-tts', 'gemini-2.5-flash', 'tts-1', 'whisper-1'],
+    ANALYSIS: ['gemini-3-pro-preview', 'gemini-2.5-flash', 'gpt-4o', 'gpt-4-turbo'],
     LIVE: ['gemini-2.5-flash-native-audio-preview-09-2025']
 };
 
@@ -95,13 +93,12 @@ const TECH_LOGS = [
 const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, participants }) => {
   const [activeTab, setActiveTab] = useState<TabId>('IMAGE');
   
-  // GLOBAL INDEPENDENT CONFIG
   const [globalConfig, setGlobalConfig] = useState<MultimodalConfig>(() => {
       try {
           const saved = localStorage.getItem('galaxyous_multimodal_config');
           if (saved) return JSON.parse(saved);
       } catch(e) {}
-      return { apiKey: '', baseUrl: '', customModels: [] };
+      return { provider: ProviderType.GEMINI, apiKey: '', baseUrl: '', modelName: '', customModels: [] };
   });
 
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -123,12 +120,10 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
   const logsEndRef = useRef<HTMLDivElement>(null);
   const configImportRef = useRef<HTMLInputElement>(null);
 
-  // LIVE SESSION STATE
   const [liveManager, setLiveManager] = useState<LiveSessionManager | null>(null);
   const [liveVolume, setLiveVolume] = useState(0);
   const [isLiveConnected, setIsLiveConnected] = useState(false);
 
-  // Persistence for Global Config
   useEffect(() => {
       localStorage.setItem('galaxyous_multimodal_config', JSON.stringify(globalConfig));
   }, [globalConfig]);
@@ -142,14 +137,12 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
 
   const currentTab = activeTab === 'HISTORY' ? initialTabData : tabsState[activeTab as Exclude<TabId, 'HISTORY'>];
 
-  // Simulation Effect
   useEffect(() => {
       if (!currentTab.isProcessing) {
           setProgress(0);
           setLogs([]);
           return;
       }
-
       let p = 0;
       const progressInterval = setInterval(() => {
           if (p < 30) p += 5;
@@ -159,7 +152,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
           if (p > 95) p = 95; 
           setProgress(p);
       }, 150);
-
       let logIndex = 0;
       setLogs([TECH_LOGS[0]]);
       const logInterval = setInterval(() => {
@@ -168,7 +160,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
               setLogs(prev => [...prev, TECH_LOGS[logIndex]]);
           }
       }, 2000 + Math.random() * 1000);
-
       return () => {
           clearInterval(progressInterval);
           clearInterval(logInterval);
@@ -179,7 +170,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
       logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  // Clean up Live Session on unmount/close
   useEffect(() => {
       return () => {
           if (liveManager) liveManager.disconnect();
@@ -198,13 +188,11 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
   };
 
   const handleLiveStart = async () => {
-      // For Live API, we prefer the independent key, but fallback to main participants if needed
       const apiKey = globalConfig.apiKey || participants.find(p => p.provider === ProviderType.GEMINI)?.config.apiKey;
       if (!apiKey) {
           setShowSettingsModal(true);
           return;
       }
-      
       try {
           updateTab('LIVE', { isProcessing: true, error: null });
           const manager = new LiveSessionManager(
@@ -213,9 +201,7 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
               currentTab.customModel || 'gemini-2.5-flash-native-audio-preview-09-2025',
               currentTab.voiceName
           );
-          
-          manager.onVolumeChange = (vol) => setLiveVolume(vol * 5); // Amplify for visual
-          
+          manager.onVolumeChange = (vol) => setLiveVolume(vol * 5); 
           await manager.connect();
           setLiveManager(manager);
           setIsLiveConnected(true);
@@ -242,7 +228,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
         return;
     }
     
-    // Check Key
     if (!globalConfig.apiKey) {
         setShowSettingsModal(true);
         return;
@@ -263,8 +248,8 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
     try {
         const apiKey = globalConfig.apiKey;
         const baseUrl = globalConfig.baseUrl;
+        const provider = globalConfig.provider || ProviderType.GEMINI; // Use provider from config
         
-        // Assemble Advanced Config Object
         const configOverrides = {
             temperature,
             topP,
@@ -281,32 +266,34 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
             resolution,
             fps
         };
+        
+        const modelToUse = customModel || globalConfig.modelName || undefined;
 
         let resData: any = null;
         let resType = '';
 
         if (tabId === 'IMAGE') {
             if (refImage) {
-                 const res = await editImage(refImage, prompt, apiKey, baseUrl, customModel, configOverrides);
+                 const res = await editImage(refImage, prompt, apiKey, baseUrl, modelToUse, configOverrides, provider);
                  resData = res; resType = 'image';
             } else {
-                 const res = await generateImage(prompt, apiKey, imgSize, aspectRatio, baseUrl, customModel, configOverrides);
+                 const res = await generateImage(prompt, apiKey, imgSize, aspectRatio, baseUrl, modelToUse, configOverrides, provider);
                  resData = res; resType = 'image';
             }
         } else if (tabId === 'VIDEO') {
-             const res = await generateVideo(prompt, apiKey, aspectRatio as '16:9'|'9:16', baseUrl, customModel, configOverrides);
+             const res = await generateVideo(prompt, apiKey, aspectRatio as '16:9'|'9:16', baseUrl, modelToUse, configOverrides, provider);
              resData = res; resType = 'video';
         } else if (tabId === 'AUDIO') {
              if (refImage) {
-                 const res = await transcribeAudio(refImage, apiKey, baseUrl, customModel, configOverrides);
+                 const res = await transcribeAudio(refImage, apiKey, baseUrl, modelToUse, configOverrides, provider);
                  resData = res; resType = 'text';
              } else {
-                 const res = await generateSpeech(prompt, apiKey, voiceName, baseUrl, customModel, configOverrides);
+                 const res = await generateSpeech(prompt, apiKey, voiceName, baseUrl, modelToUse, configOverrides, provider);
                  resData = res; resType = 'audio';
              }
         } else if (tabId === 'ANALYSIS') {
              if (!refImage) throw new Error("请上传图片或视频帧进行分析");
-             const res = await analyzeMedia(refImage, 'image/jpeg', prompt || "Describe this.", apiKey, baseUrl, customModel, configOverrides);
+             const res = await analyzeMedia(refImage, 'image/jpeg', prompt || "Describe this.", apiKey, baseUrl, modelToUse, configOverrides, provider);
              resData = res; resType = 'text';
         }
 
@@ -371,7 +358,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
       }));
   };
 
-  // --- CONFIG IMPORT / EXPORT ---
   const handleExportConfig = () => {
       const dataStr = JSON.stringify(globalConfig, null, 2);
       const blob = new Blob([dataStr], { type: 'application/json' });
@@ -404,7 +390,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
       if (e.target) e.target.value = '';
   };
 
-  // --- SETTINGS MODAL RENDERER ---
   const renderSettingsModal = () => (
       <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-[#1c1c1e] w-full max-w-lg rounded-3xl border border-white/10 shadow-2xl animate-slide-up flex flex-col max-h-[90vh]">
@@ -416,7 +401,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
               </div>
               <div className="p-6 overflow-y-auto space-y-6">
                   
-                  {/* IMPORT/EXPORT BUTTONS */}
                   <div className="flex gap-3">
                       <button 
                         onClick={handleExportConfig}
@@ -433,9 +417,30 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                       <input type="file" ref={configImportRef} className="hidden" accept=".json" onChange={handleImportConfig} />
                   </div>
 
+                  {/* Provider Selector */}
+                  <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">服务提供商 (Provider)</label>
+                      <div className="grid grid-cols-2 gap-2 bg-black/40 p-1 rounded-xl border border-white/10">
+                          <button
+                            onClick={() => setGlobalConfig(prev => ({ ...prev, provider: ProviderType.GEMINI }))}
+                            className={`py-2 rounded-lg text-sm font-bold transition-all ${globalConfig.provider === ProviderType.GEMINI ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+                          >
+                             Google Gemini
+                          </button>
+                          <button
+                            onClick={() => setGlobalConfig(prev => ({ ...prev, provider: ProviderType.OPENAI_COMPATIBLE }))}
+                            className={`py-2 rounded-lg text-sm font-bold transition-all ${globalConfig.provider === ProviderType.OPENAI_COMPATIBLE ? 'bg-green-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+                          >
+                             OpenAI / Compatible
+                          </button>
+                      </div>
+                  </div>
+
                   {/* API Key */}
                   <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">Google Gemini API Key</label>
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                          {globalConfig.provider === ProviderType.GEMINI ? 'Google Gemini API Key' : 'OpenAI Compatible API Key'}
+                      </label>
                       <input 
                         type="password" 
                         value={globalConfig.apiKey}
@@ -444,6 +449,7 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none font-mono"
                       />
                   </div>
+                  
                   {/* Base URL */}
                   <div className="space-y-2">
                       <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">Base URL (Optional)</label>
@@ -451,10 +457,29 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                         type="url" 
                         value={globalConfig.baseUrl}
                         onChange={(e) => setGlobalConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
-                        placeholder="https://generativelanguage.googleapis.com"
+                        placeholder={globalConfig.provider === ProviderType.GEMINI ? "https://generativelanguage.googleapis.com" : "https://api.openai.com/v1"}
                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none font-mono"
                       />
-                      <p className="text-[10px] text-slate-500">默认为空 (使用 Google 官方 API)。如需代理，请填完整 URL。</p>
+                      <p className="text-[10px] text-slate-500">
+                          {globalConfig.provider === ProviderType.GEMINI 
+                             ? "默认为空 (使用 Google 官方 API)。" 
+                             : "默认为 https://api.openai.com/v1。"}
+                      </p>
+                  </div>
+
+                  {/* Default Model Name */}
+                  <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block">默认模型 ID (Default Model)</label>
+                      <input 
+                        type="text" 
+                        value={globalConfig.modelName}
+                        onChange={(e) => setGlobalConfig(prev => ({ ...prev, modelName: e.target.value }))}
+                        placeholder={globalConfig.provider === ProviderType.GEMINI ? "gemini-3-pro-image-preview" : "dall-e-3"}
+                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none font-mono"
+                      />
+                      <p className="text-[10px] text-slate-500">
+                          为空时使用系统默认推荐模型。
+                      </p>
                   </div>
                   
                   <div className="h-px bg-white/10"></div>
@@ -462,13 +487,13 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                   {/* Custom Models */}
                   <div className="space-y-3">
                       <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                          <Layers size={12}/> 自定义模型 ID 列表
+                          <Layers size={12}/> 常用模型快捷列表
                       </label>
                       <div className="flex gap-2">
                           <input 
                             value={newModelInput}
                             onChange={(e) => setNewModelInput(e.target.value)}
-                            placeholder="Add model ID (e.g. imagen-3.0)"
+                            placeholder="Add model ID (e.g. flux-1)"
                             className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-2 text-white text-sm outline-none"
                           />
                           <button 
@@ -503,11 +528,9 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
   const renderTabContent = () => {
       const isRawUri = (currentTab.result?.data || '').startsWith(URI_PREFIX);
       
-      // ... (Live and History tabs similar to before, kept for brevity)
       if (activeTab === 'LIVE') {
           return (
             <div className="flex flex-col items-center justify-center h-full text-center max-w-md animate-fade-in relative">
-                {/* Visualizer same as before */}
                 {isLiveConnected ? (
                     <div className="relative w-48 h-48 mb-8 flex items-center justify-center">
                          <div className="absolute inset-0 bg-blue-500 rounded-full opacity-20" style={{ transform: `scale(${1 + liveVolume})`, transition: 'transform 0.1s' }}></div>
@@ -521,12 +544,10 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                         <Mic size={48} className="text-slate-500" />
                     </div>
                 )}
-
                 <h2 className="text-2xl font-bold mb-2 text-white">{isLiveConnected ? "正在通话 (Live)" : "Gemini Live"}</h2>
                 <p className="text-slate-400 mb-8 leading-relaxed">
-                    {isLiveConnected ? "正在实时收听与回复..." : "点击连接以开启实时语音对话。\n需确保麦克风权限已开启。"}
+                    {isLiveConnected ? "正在实时收听与回复..." : "点击连接以开启实时语音对话。\n需确保麦克风权限已开启。Live API 仅支持 Gemini。"}
                 </p>
-
                 <button 
                   onClick={handleAction}
                   disabled={currentTab.isProcessing}
@@ -539,7 +560,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                     )}
                     {currentTab.isProcessing ? "连接中..." : (isLiveConnected ? "结束通话" : "开始连接")}
                 </button>
-                
                 {currentTab.error && (
                     <div className="mt-6 p-3 bg-red-900/50 border border-red-500/30 rounded-lg text-red-200 text-sm max-w-sm">
                         {currentTab.error}
@@ -591,7 +611,8 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
       }
 
       const showAspectRatio = activeTab === 'IMAGE' || activeTab === 'VIDEO';
-      const showImgSize = activeTab === 'IMAGE' && !currentTab.refImage;
+      const showImgSize = activeTab === 'IMAGE' && !currentTab.refImage && globalConfig.provider === ProviderType.GEMINI; 
+      
       const showVoice = activeTab === 'AUDIO' && !currentTab.refImage;
       const showUpload = activeTab === 'IMAGE' || activeTab === 'AUDIO' || activeTab === 'ANALYSIS';
       
@@ -627,25 +648,20 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                         </button>
                     </div>
 
-                    {/* Advanced Config Panel (ENHANCED) */}
                     {showAdvanced && (
                         <div className="mb-6 p-5 bg-black/40 rounded-xl border border-white/10 space-y-5 animate-slide-up">
-                            
-                            {/* Smart Model Selector */}
                             <div>
-                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2"><Zap size={12}/> 模型选择 (Model)</label>
+                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2"><Zap size={12}/> 模型选择 (Model Override)</label>
                                 <select
                                     value={currentTab.customModel}
                                     onChange={(e) => updateTab(activeTab as any, { customModel: e.target.value })}
                                     className="w-full bg-[#1c1c1e] border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-purple-500"
                                 >
-                                    <option value="" className="bg-[#1c1c1e] text-white">默认 (自动)</option>
+                                    <option value="" className="bg-[#1c1c1e] text-white">默认 (Default)</option>
                                     {availableModels.map(m => <option key={m} value={m} className="bg-[#1c1c1e] text-white">{m}</option>)}
                                 </select>
                             </div>
-
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {/* Temperature */}
                                 <div>
                                     <div className="flex justify-between items-center mb-2">
                                         <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><ThermometerSun size={12}/> 随机性 (Temperature)</label>
@@ -658,7 +674,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                                         className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-purple-500"
                                     />
                                 </div>
-                                {/* Top P */}
                                 <div>
                                     <div className="flex justify-between items-center mb-2">
                                         <label className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Hash size={12}/> 核采样 (Top P)</label>
@@ -673,7 +688,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                                 </div>
                             </div>
                             
-                            {/* IMAGE Specific Params */}
                             {activeTab === 'IMAGE' && (
                                 <>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -691,7 +705,7 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2"><Shield size={12}/> 负面提示词 (避免出现的内容)</label>
+                                        <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2"><Shield size={12}/> 负面提示词 (Avoid)</label>
                                         <textarea
                                             value={currentTab.negativePrompt}
                                             onChange={(e) => updateTab(activeTab as any, { negativePrompt: e.target.value })}
@@ -702,7 +716,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                                 </>
                             )}
                             
-                            {/* VIDEO Specific Params */}
                             {activeTab === 'VIDEO' && (
                                 <div className="grid grid-cols-1 md:grid-cols-1 gap-6">
                                     <div>
@@ -719,7 +732,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                                 </div>
                             )}
 
-                            {/* Common: Seed & Safety */}
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div>
                                     <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2"><Hash size={12}/> 随机种子 (Seed)</label>
@@ -731,25 +743,11 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                                         className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-600 outline-none focus:border-purple-500 font-mono"
                                     />
                                 </div>
-                                <div>
-                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2"><Shield size={12}/> 安全过滤 (Safety)</label>
-                                    <select 
-                                        value={currentTab.safetyLevel}
-                                        onChange={(e) => updateTab(activeTab as any, { safetyLevel: e.target.value as any })}
-                                        className="w-full bg-[#1c1c1e] border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-purple-500"
-                                    >
-                                        <option value="BLOCK_NONE" className="bg-[#1c1c1e] text-white">关闭拦截 (Block None)</option>
-                                        <option value="BLOCK_SOME" className="bg-[#1c1c1e] text-white">默认拦截 (Block Some)</option>
-                                        <option value="BLOCK_MOST" className="bg-[#1c1c1e] text-white">严格拦截 (Block Most)</option>
-                                    </select>
-                                </div>
                             </div>
                         </div>
                     )}
 
-                    {/* Toolbar */}
                     <div className="flex flex-wrap gap-3 mb-5 relative z-10">
-                        {/* Aspect Ratio, Size, Voice dropdowns (Existing) */}
                         {showAspectRatio && (
                             <select 
                                 value={currentTab.aspectRatio} 
@@ -782,6 +780,8 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                                 <option value="Kore" className="bg-[#1c1c1e] text-white">Kore</option>
                                 <option value="Puck" className="bg-[#1c1c1e] text-white">Puck</option>
                                 <option value="Fenrir" className="bg-[#1c1c1e] text-white">Fenrir</option>
+                                <option value="Alloy" className="bg-[#1c1c1e] text-white">Alloy (OA)</option>
+                                <option value="Echo" className="bg-[#1c1c1e] text-white">Echo (OA)</option>
                             </select>
                         )}
                         {showUpload && (
@@ -795,7 +795,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                         <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} />
                     </div>
                     
-                    {/* Prompt and RefImage UI (Existing) */}
                     {currentTab.refImage && (
                         <div className="mb-5 relative w-fit group rounded-xl overflow-hidden border border-white/20 shadow-lg animate-fade-in">
                             {activeTab === 'AUDIO' ? (
@@ -845,12 +844,10 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
 
             {currentTab.isProcessing && (
                 <div className="flex flex-col items-center justify-center h-[60vh] animate-fade-in relative w-full max-w-2xl mx-auto">
-                    {/* ENHANCED WAITING EFFECT: Particle Background */}
                     <div className="absolute inset-0 overflow-hidden pointer-events-none">
                          <div className="absolute top-1/2 left-1/2 w-[300px] h-[300px] bg-blue-500/10 blur-3xl rounded-full animate-pulse-slow transform -translate-x-1/2 -translate-y-1/2"></div>
                          <div className="absolute top-1/2 left-1/2 w-[200px] h-[200px] bg-purple-500/10 blur-3xl rounded-full animate-bounce transform -translate-x-1/2 -translate-y-1/2"></div>
                     </div>
-
                     <div className="w-full bg-white/10 rounded-full h-1.5 mb-8 overflow-hidden z-10">
                         <div className="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all duration-300 ease-out" style={{ width: `${progress}%` }}></div>
                     </div>
@@ -880,7 +877,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                 </div>
             )}
             
-            {/* Result Display (Same as before) */}
             {currentTab.result && !currentTab.isProcessing && (
                 <div className="bg-[#1c1c1e] p-6 rounded-3xl border border-white/10 shadow-2xl animate-slide-up relative overflow-hidden">
                     <div className="flex justify-between items-center mb-6">
@@ -891,14 +887,11 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                             返回编辑
                         </button>
                     </div>
-                    
-                    {/* Media Container */}
                     <div className="flex justify-center bg-black/40 rounded-2xl overflow-hidden border border-white/5 min-h-[300px] items-center relative">
                         {currentTab.result.type === 'image' && (
                             <img src={`data:image/png;base64,${currentTab.result.data}`} className="relative z-10 max-w-full max-h-[600px] object-contain shadow-2xl" />
                         )}
                         {currentTab.result.type === 'video' && (
-                             // Only use <video> for direct MP4 data URIs. For remote URIs (fallback), use a link card.
                              !isRawUri ? (
                                  <video 
                                    controls autoPlay loop className="relative z-10 max-w-full max-h-[600px] shadow-2xl"
@@ -962,7 +955,7 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                 <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-pink-400 via-purple-400 to-indigo-400">
                     多模态创作中心
                 </h1>
-                <p className="text-xs text-slate-400">基于 Gemini 3.0 & Veo</p>
+                <p className="text-xs text-slate-400">支持 Google Gemini & OpenAI Providers</p>
                 </div>
             </div>
             <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors"><X size={24} /></button>
@@ -999,7 +992,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
                     )})}
                 </div>
                 
-                {/* Global Settings Trigger */}
                 <button 
                     onClick={() => setShowSettingsModal(true)}
                     className="w-full flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-white/10 rounded-2xl border border-white/5 transition-colors text-slate-400 hover:text-white"
@@ -1015,7 +1007,6 @@ const MultimodalCenter: React.FC<MultimodalCenterProps> = ({ isOpen, onClose, pa
         </div>
         </div>
 
-        {/* Global Settings Modal Overlay */}
         {showSettingsModal && renderSettingsModal()}
     </>
   );

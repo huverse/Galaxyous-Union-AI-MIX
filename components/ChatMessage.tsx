@@ -5,11 +5,12 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { Message, Participant } from '../types';
 import { USER_ID } from '../constants';
-import { Bot, User, BrainCircuit, Lock, Clapperboard, ShieldAlert, Gavel, BookOpen, CheckCircle2, Circle, Microscope, ChevronDown, ChevronUp, Clock, Smile, Activity, MapPin } from 'lucide-react';
+import { Bot, User, BrainCircuit, Lock, Clapperboard, ShieldAlert, Gavel, BookOpen, CheckCircle2, Circle, Microscope, ChevronDown, ChevronUp, Clock, Smile, Activity, MapPin, Eye, EyeOff, ArrowRight } from 'lucide-react';
 
 interface ChatMessageProps {
   message: Message;
   sender?: Participant;
+  allParticipants?: Participant[]; // Added to lookup recipient details
   isSpecialRole?: boolean;
   specialRoleType?: 'JUDGE' | 'NARRATOR';
   // Selection Props
@@ -17,7 +18,7 @@ interface ChatMessageProps {
   isSelected: boolean;
   onSelect: (id: string) => void;
   onLongPress: (id: string) => void;
-  isSocialMode?: boolean; // Added prop to assist parsing context
+  isSocialMode?: boolean; 
 }
 
 // Tokenizer for the custom formats
@@ -39,25 +40,21 @@ const tryParseJson = (str: string): any => {
     try { return JSON.parse(clean); } catch (e) {}
 
     // Strategy 2: Fix Trailing Commas & Braces
-    // e.g. "..., }}" -> "}"
     let fixed = clean.replace(/,\s*}}+$/g, '}').replace(/,\s*]+$/g, ']');
     try { return JSON.parse(fixed); } catch (e) {}
 
-    // Strategy 3: Fix Double Closing Braces (Common LLM Hallucination)
+    // Strategy 3: Fix Double Closing Braces
     if (fixed.endsWith('}}')) fixed = fixed.slice(0, -1);
     try { return JSON.parse(fixed); } catch (e) {}
 
-    // Strategy 4: Handle Truncated JSON (Missing closing brace)
+    // Strategy 4: Handle Truncated JSON
     if (!fixed.endsWith('}')) {
         try { return JSON.parse(fixed + '}'); } catch (e) {}
-        try { return JSON.parse(fixed + '"}'); } catch (e) {} // Closing quote needed
+        try { return JSON.parse(fixed + '"}'); } catch (e) {} 
         try { return JSON.parse(fixed + '"]'); } catch (e) {}
     }
     
-    // Strategy 5: Fix Escaped Backslashes for LaTeX (The "Logic Mode" fix)
-    // Sometimes LLMs forget to escape backslashes in LaTeX strings inside JSON.
-    // e.g. "Language": "\frac{a}{b}" -> Invalid JSON. Needs "\\frac{a}{b}".
-    // This is a risky regex replace but helps in many cases.
+    // Strategy 5: Fix Escaped Backslashes for LaTeX
     try {
         const latexFixed = clean.replace(/\\([a-zA-Z]+)/g, '\\\\$1');
         return JSON.parse(latexFixed);
@@ -71,25 +68,18 @@ const extractSocialFields = (text: string): any => {
     const fields: any = {};
     const keys = ["Virtual Timeline Time", "Language", "Specific Actions", "Facial Expressions", "Psychological State", "Non-specific Actions"];
     
-    // Improved Regex to handle multi-line content (s flag equivalence)
     keys.forEach(key => {
-        // Look for "Key": "Value" or "Key": <json_string>
-        // We capture everything until the next key starts or end of block
-        // This is a heuristic and might be fragile if keys appear in content
         const regex = new RegExp(`"${key}"\\s*:\\s*"([\\s\\S]*?)"(?=\\s*,\\s*"|\\s*})`, 'i');
         const match = text.match(regex);
         if (match) {
-            // Unescape escaped quotes if any
             fields[key] = match[1].replace(/\\"/g, '"');
         }
     });
     
-    // Fallback for Language if it's the main chunk
     if (!fields["Language"]) {
-        const langMatch = text.match(/"Language"\s*:\s*"([\s\\S]*)/i); // Grab rest if broken
+        const langMatch = text.match(/"Language"\s*:\s*"([\s\\S]*)/i); 
         if (langMatch) {
              const val = langMatch[1].trim();
-             // Try to cleanup trailing chars if it looks like end of JSON
              fields["Language"] = val.replace(/",?\s*[\}\]]*$/, '');
         }
     }
@@ -109,31 +99,37 @@ const parseMessageContent = (text: string): Token[] => {
     .replace(/\n\(END DATA[\s\S]*$/i, '')
     .trim();
 
-  // 2. Handle Code Blocks first
+  // 2. Handle Code Blocks & JSON Unwrapping
   const codeBlockSplit = cleanText.split(/(```[\s\S]*?```)/g);
   
   codeBlockSplit.forEach((segment, index) => {
-      // Odd indices are code blocks (keep raw)
-      if (index % 2 !== 0) {
-          tokens.push({ type: 'text', content: segment });
-          return;
+      const isCodeBlock = index % 2 !== 0;
+      let contentToProcess = segment;
+
+      if (isCodeBlock) {
+          const inner = segment.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/, '');
+          const isUnifiedJson = /"Virtual Timeline Time"|"Psychological State"|"Specific Actions"|"Language"/.test(inner);
+          
+          if (isUnifiedJson) {
+              contentToProcess = inner; // Unwrap
+          } else {
+              tokens.push({ type: 'text', content: segment });
+              return;
+          }
       }
 
       // 3. Logic Mode / Unified JSON Detection
-      const isLikelyUnifiedJson = /"Virtual Timeline Time"|"Psychological State"|"Specific Actions"|"Language"/.test(segment);
+      const isLikelyUnifiedJson = /"Virtual Timeline Time"|"Psychological State"|"Specific Actions"|"Language"/.test(contentToProcess);
       
       if (isLikelyUnifiedJson) {
-         // Locate JSON block
-         const startIdx = segment.indexOf('{');
-         const endIdx = segment.lastIndexOf('}');
+         const startIdx = contentToProcess.indexOf('{');
+         const endIdx = contentToProcess.lastIndexOf('}');
          
-         if (startIdx !== -1) {
-             const preText = segment.slice(0, startIdx).trim();
-             if (preText) tokens.push({ type: 'text', content: preText });
+         if (startIdx !== -1 && endIdx > startIdx) {
+             const preText = contentToProcess.slice(0, startIdx).trim();
+             if (preText && !isCodeBlock) tokens.push({ type: 'text', content: preText });
 
-             let jsonCandidate = (endIdx > startIdx) 
-                ? segment.slice(startIdx, endIdx + 1) 
-                : segment.slice(startIdx);
+             let jsonCandidate = contentToProcess.slice(startIdx, endIdx + 1);
              
              let metadata = tryParseJson(jsonCandidate);
              if (!metadata) {
@@ -143,9 +139,8 @@ const parseMessageContent = (text: string): Token[] => {
              if (metadata) {
                  tokens.push({ type: 'social_block', content: '', metadata });
                  
-                 // Handle Text AFTER JSON
-                 if (endIdx !== -1 && endIdx < segment.length - 1) {
-                     const postText = segment.slice(endIdx + 1);
+                 if (!isCodeBlock && endIdx < contentToProcess.length - 1) {
+                     const postText = contentToProcess.slice(endIdx + 1);
                      const cleanedPost = postText.replace(/^,?\s*}+/, '').trim();
                      if (cleanedPost && /[a-zA-Z0-9\u4e00-\u9fa5]/.test(cleanedPost)) {
                          tokens.push({ type: 'text', content: cleanedPost });
@@ -156,10 +151,16 @@ const parseMessageContent = (text: string): Token[] => {
          }
       }
 
-      // 4. Fallback: If JSON parsing failed but it looks like Logic Mode output (LaTeX heavy), treat as text
-      // This prevents the "messy code" look if the JSON structure is broken but content is there.
-      
-      // 5. Regular Legacy Parsing
+      if (isCodeBlock) {
+          tokens.push({ type: 'text', content: segment });
+          return;
+      }
+
+      if (segment.trim() === '$$') {
+          tokens.push({ type: 'text', content: '\\$$' });
+          return;
+      }
+
       const subRegex = /(\[.*?\])|(\{.*?\})|((?<!https?:)\/\/.*?\/\/)/s;
       const subParts = segment.split(subRegex).filter(p => p !== undefined && p !== '');
       
@@ -180,11 +181,23 @@ const parseMessageContent = (text: string): Token[] => {
 };
 
 const ChatMessage: React.FC<ChatMessageProps> = ({ 
-  message, sender, isSpecialRole, specialRoleType,
+  message, sender, allParticipants, isSpecialRole, specialRoleType,
   selectionMode, isSelected, onSelect, onLongPress, isSocialMode
 }) => {
   const isUser = message.senderId === USER_ID;
   const isSystem = message.senderId === 'SYSTEM';
+  const isPrivate = !!message.recipientId;
+  
+  // Resolve Recipient for Private Messages
+  let recipientName = 'Unknown';
+  if (isPrivate && allParticipants) {
+      if (message.recipientId === USER_ID) recipientName = '我 (You)';
+      else {
+          const r = allParticipants.find(p => p.id === message.recipientId);
+          recipientName = r ? (r.nickname || r.name) : message.recipientId!;
+      }
+  }
+
   const tokens = useMemo(() => parseMessageContent(message.content), [message.content]);
   
   const timerRef = useRef<number | null>(null);
@@ -321,7 +334,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
         <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 flex-1 max-w-full`}>
           {!isUser && (
-            <div className="flex items-center gap-2 mb-1 ml-1">
+            <div className="flex items-center gap-2 mb-1 ml-1 flex-wrap">
               <span className={`text-xs md:text-sm font-bold ${isSpecialRole ? 'text-amber-600 dark:text-amber-400' : 'text-slate-700 dark:text-slate-200'}`}>
                 {sender?.nickname || sender?.name || 'Unknown AI'}
               </span>
@@ -331,6 +344,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
               >
                   <BrainCircuit size={10} className="text-blue-500" style={{ opacity: simulationOpacity }} />
               </div>
+              
+              {/* Private Indicator */}
+              {isPrivate && (
+                  <div className="flex items-center gap-1.5 bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-200 px-2 py-0.5 rounded-md text-[10px] font-bold border border-purple-200 dark:border-purple-800/50 shadow-sm">
+                      <Lock size={10} />
+                      <span className="opacity-75">密语</span>
+                      <ArrowRight size={10} className="opacity-50" />
+                      <span>{recipientName}</span>
+                  </div>
+              )}
             </div>
           )}
 
@@ -358,9 +381,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                  if (token.type === 'social_block') {
                     // --- SOCIAL / LOGIC MODE CARD ---
                     const m = token.metadata || {};
-                    // Logic mode usually has long Language content with headers and math.
                     return (
                         <div key={index} className="bg-white dark:bg-[#151516] border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-xl w-full max-w-2xl mb-2 relative overflow-hidden group/card hover:shadow-2xl transition-all">
+                            {/* ... Social Block Content ... */}
                             <div className="absolute top-0 right-0 p-3 opacity-10 group-hover/card:opacity-20 transition-opacity pointer-events-none">
                                 <Activity size={80} />
                             </div>
@@ -370,7 +393,6 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                 <span>{m['Virtual Timeline Time'] || 'Unknown Time'}</span>
                             </div>
 
-                            {/* Main Content Area - Supports LaTeX */}
                             <div className="mb-4 text-slate-800 dark:text-slate-100 text-base md:text-lg font-medium leading-relaxed markdown-body">
                                 <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
                                   {m['Language'] || ''}
@@ -439,11 +461,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                    // --- STANDARD TEXT / FALLBACK ---
                    if (!token.content.trim()) return null;
                    
-                   const bubbleStyle = isUser 
+                   let bubbleStyle = isUser 
                         ? 'bg-blue-600 text-white rounded-[1.25rem] rounded-tr-sm'
                         : isSpecialRole
                            ? 'bg-amber-50 dark:bg-[#1a1500] text-amber-900 dark:text-amber-100 border border-amber-100 dark:border-amber-900 rounded-[1.25rem] rounded-tl-sm shadow-md shadow-amber-500/5'
                            : 'bg-white dark:bg-[#1e1e1e] text-slate-800 dark:text-slate-100 border border-slate-100 dark:border-slate-700 rounded-[1.25rem] rounded-tl-sm';
+
+                   // Private Message Styling Override
+                   if (isPrivate) {
+                       bubbleStyle = 'bg-purple-50 dark:bg-purple-900/10 text-purple-900 dark:text-purple-100 border border-purple-200 dark:border-purple-800 rounded-[1.25rem] rounded-tl-sm shadow-inner';
+                   }
 
                    return (
                      <div key={index} className={`

@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Modality } from "@google/genai";
-import { Message, Participant, ProviderType, ParticipantConfig, TokenUsage } from '../types';
+import { Message, Participant, ProviderType, ParticipantConfig, TokenUsage, RefereeContext } from '../types';
 import { USER_ID } from '../constants';
 
 const MAX_RETRIES = 1;
@@ -15,14 +15,11 @@ const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
  * Utility: Sanitize GoogleGenAI Options
- * Ensures baseUrl is only passed if it's a valid non-empty string.
- * Removes trailing slashes to prevent double-slash errors in SDK.
  */
 const sanitizeOptions = (apiKey: string, baseUrl?: string): any => {
     const options: any = { apiKey };
     if (baseUrl && baseUrl.trim().length > 0) {
         let clean = baseUrl.trim();
-        // Remove all trailing slashes
         while (clean.endsWith('/')) {
             clean = clean.slice(0, -1);
         }
@@ -44,7 +41,6 @@ const fetchWithRetry = async (url: string, options: RequestInit, signal?: AbortS
 
     try {
       const controller = new AbortController();
-      // Use the global REQUEST_TIMEOUT
       const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
       
       if (signal) {
@@ -59,7 +55,6 @@ const fetchWithRetry = async (url: string, options: RequestInit, signal?: AbortS
       clearTimeout(timeoutId);
 
       if (!res.ok) {
-        // Handle 504 Gateway Timeout specifically
         if (res.status === 504) {
              throw new Error("Gateway Timeout (504): The model took too long to respond. Please try a faster model or reducing complexity.");
         }
@@ -90,6 +85,41 @@ const fetchWithRetry = async (url: string, options: RequestInit, signal?: AbortS
   throw lastError;
 };
 
+// --- OpenAI Helper ---
+const normalizeOpenAIUrl = (url?: string): string => {
+    if (!url?.trim()) return 'https://api.openai.com/v1';
+    let cleanUrl = url.trim().replace(/\/+$/, '');
+    if (cleanUrl.endsWith('/v1')) return cleanUrl;
+    // If user provided a root url like https://api.openai.com, append v1
+    // But be careful with custom proxies that might not use v1
+    // If it ends with chat/completions, strip it
+    if (cleanUrl.endsWith('/chat/completions')) return cleanUrl.replace('/chat/completions', '');
+    return cleanUrl;
+};
+
+const fetchOpenAI = async (endpoint: string, apiKey: string, baseUrl: string | undefined, body: any, isBinary = false): Promise<any> => {
+    const base = normalizeOpenAIUrl(baseUrl);
+    const url = `${base}${endpoint}`;
+    
+    const res = await fetchWithRetry(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`OpenAI API Error (${res.status}): ${err}`);
+    }
+
+    if (isBinary) return res.blob();
+    return res.json();
+};
+
+// ... (LiveSessionManager and other helpers omitted for brevity, no changes needed there) ...
 // ==================================================================================
 //  LIVE API MANAGER (Real-time Audio)
 // ==================================================================================
@@ -102,7 +132,6 @@ export class LiveSessionManager {
     private isConnected: boolean = false;
     private currentStream: MediaStream | null = null;
     
-    // Audio Scheduling for Seamless Playback
     private nextStartTime: number = 0;
     
     public onVolumeChange: ((vol: number) => void) | null = null;
@@ -115,10 +144,8 @@ export class LiveSessionManager {
         const options = sanitizeOptions(this.apiKey, this.baseUrl);
         const ai = new GoogleGenAI(options);
 
-        // Initialize Audio Context
-        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 }); // Output usually 24k
+        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 }); 
         
-        // Start Live Session
         const model = this.modelName || 'gemini-2.5-flash-native-audio-preview-09-2025';
         this.client = await ai.live.connect({
             model,
@@ -132,10 +159,9 @@ export class LiveSessionManager {
                 onopen: () => {
                     console.log("Live Session Connected");
                     this.isConnected = true;
-                    this.nextStartTime = 0; // Reset scheduler
+                    this.nextStartTime = 0; 
                 },
                 onmessage: (msg: any) => {
-                    // Handle Audio Output from Model
                     const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
                     if (audioData) {
                         this.playAudioChunk(audioData);
@@ -151,20 +177,16 @@ export class LiveSessionManager {
             }
         });
 
-        // Start Microphone Input
         await this.startMicrophone();
     }
 
     private async startMicrophone() {
         if (!this.audioContext) return;
-        
-        // Ensure context is running (browser autoplay policy)
         if (this.audioContext.state === 'suspended') {
             await this.audioContext.resume();
         }
 
         try {
-            // Input sample rate 16000 is standard for speech API
             this.currentStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
                     sampleRate: 16000,
@@ -174,10 +196,6 @@ export class LiveSessionManager {
                 } 
             });
             
-            // We need a separate context for input if the sample rates differ widely, 
-            // or just use the same context and let Web Audio handle resampling.
-            // However, ScriptProcessorNode is simple but deprecated. 
-            // For robustness, we use a separate input context matching the desired input rate.
             const inputContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
             this.inputSource = inputContext.createMediaStreamSource(this.currentStream);
             this.processor = inputContext.createScriptProcessor(4096, 1, 1);
@@ -190,13 +208,11 @@ export class LiveSessionManager {
 
                 const inputData = e.inputBuffer.getChannelData(0);
                 
-                // Calculate Volume for UI
                 let sum = 0;
                 for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
                 const rms = Math.sqrt(sum / inputData.length);
                 if (this.onVolumeChange) this.onVolumeChange(rms);
 
-                // Convert Float32 to Int16 PCM (Base64)
                 const base64PCM = this.float32ToBase64(inputData);
                 
                 this.client.sendRealtimeInput({
@@ -230,7 +246,6 @@ export class LiveSessionManager {
     private async playAudioChunk(base64: string) {
         if (!this.audioContext) return;
 
-        // Decode Base64 to ArrayBuffer
         const binaryString = atob(base64);
         const len = binaryString.length;
         const bytes = new Uint8Array(len);
@@ -238,7 +253,6 @@ export class LiveSessionManager {
             bytes[i] = binaryString.charCodeAt(i);
         }
         
-        // Raw PCM Int16 to AudioBuffer
         const int16Data = new Int16Array(bytes.buffer);
         const float32Data = new Float32Array(int16Data.length);
         for (let i=0; i<int16Data.length; i++) {
@@ -252,11 +266,7 @@ export class LiveSessionManager {
         source.buffer = audioBuffer;
         source.connect(this.audioContext.destination);
 
-        // SCHEDULING LOGIC FOR SEAMLESS PLAYBACK
         const currentTime = this.audioContext.currentTime;
-        
-        // If nextStartTime is in the past (gap in speech), reset to now.
-        // BUFFER: 0.15s (150ms) buffer to prevent stuttering on jittery networks
         if (this.nextStartTime < currentTime) {
             this.nextStartTime = currentTime + 0.15; 
         }
@@ -327,7 +337,7 @@ export const generateSessionTitle = async (
             Task: Generate a VIVID, VISUAL, and CONCISE title (Max 8 chars).
             User: "${firstUserMessage.slice(0, 300)}"
             AI: "${firstAiResponse.slice(0, 300)}"
-            Output: RAW TITLE ONLY. No prefixes.
+            Output: RAW TITLE ONLY. No prefixes. If input is Chinese, output Chinese.
         `;
 
         const response = await ai.models.generateContent({
@@ -348,32 +358,53 @@ export const generateSessionTitle = async (
     }
 }
 
+// Updated filtering logic to handle Private Messages & Alliance
 const filterHistoryForParticipant = (targetParticipant: Participant, history: Message[], allParticipants: Participant[], isSocialMode: boolean = false): Message[] => {
   return history.map(msg => {
+    // 1. Private Message Filtering
+    if (msg.recipientId) {
+        // Only visible to: Recipient, Sender, and User (Implied admin)
+        const isRecipient = msg.recipientId === targetParticipant.id;
+        const isSender = msg.senderId === targetParticipant.id;
+        const isUser = targetParticipant.id === USER_ID; 
+        
+        // Alliance Check: If recipientId matches the target's Alliance ID (e.g., 'wolf'), they can see it
+        let isAllianceMsg = false;
+        if (targetParticipant.config.allianceId && msg.recipientId === targetParticipant.config.allianceId) {
+            isAllianceMsg = true;
+        }
+
+        // Referee always sees everything (Special Role in Game/Judge Mode)
+        // Note: targetParticipant.id is passed. If this logic runs FOR Referee, they are the target.
+        // But Referee usually isn't User. User is User.
+        // We assume Referee (if AI) is handled by "isSender" if they sent it, 
+        // OR if they are the designated Judge, they should see all.
+        // But here we don't know who is Judge easily without passing context. 
+        // Usually Private msgs are Player <-> Player or Player <-> Judge.
+        
+        // If the AI is NOT the recipient, NOT the sender, NOT the User, and NOT in the Alliance
+        if (!isRecipient && !isSender && !isUser && !isAllianceMsg) {
+             return null; 
+        }
+    }
+
     if (msg.senderId === USER_ID) return msg;
     const sender = allParticipants.find(p => p.id === msg.senderId);
     if (!sender || sender.id === targetParticipant.id) return msg;
 
     let filteredContent = msg.content;
     
-    // Logic Mode Thought Hiding (Logic mode always wants access to logic, so we generally keep it unless specified otherwise)
-    // However, if we want strict realism, they shouldn't read each other's "minds" unless they communicate it.
-    // For Logic Mode in this update: We WANT them to critique the reasoning, so we might need to expose parts of the thought process 
-    // OR rely on the explicit LaTeX output. Let's keep thoughts hidden by default to encourage explicit communication.
+    // Hide Thought Blocks from other AIs
     filteredContent = filteredContent.replace(/\[\[THOUGHT\]\]([\s\S]*?)\[\[\/THOUGHT\]\]/gs, '');
 
     const isAlly = targetParticipant.config.allianceId && sender.config.allianceId && targetParticipant.config.allianceId === sender.config.allianceId;
     
-    // JSON "Psychological State" Hiding Logic
-    // In Social Mode: Hide internal thoughts unless ally.
-    // In Logic Mode: We might want to see the "Logic" field to perform peer review? 
-    // Actually, "Peer Review" implies reviewing the *published* work (Language). 
-    // So hiding Psychological State is correct behavior for all modes to simulate real agency.
+    // Hide Internal State in Social Mode unless allied
     if (!isAlly && !targetParticipant.id.includes(msg.senderId)) { 
         filteredContent = filteredContent.replace(/("Psychological State"\s*:\s*")((?:[^"\\]|\\.)*)(")/g, '$1[Hidden Internal Thought]$3');
     }
     return { ...msg, content: filteredContent.trim() };
-  }).filter(msg => msg.content.length > 0 || (msg.images && msg.images.length > 0)); 
+  }).filter((msg): msg is Message => msg !== null && (msg.content.length > 0 || (msg.images && msg.images.length > 0))); 
 };
 
 const formatErrorMessage = (error: any): string => {
@@ -404,15 +435,6 @@ const formatErrorMessage = (error: any): string => {
   return `系统错误: ${msg.slice(0, 200)}`;
 };
 
-const normalizeOpenAIUrl = (url?: string): string => {
-    if (!url?.trim()) throw new Error("Base URL 未填写");
-    let cleanUrl = url.trim().replace(/\/+$/, '');
-    if (cleanUrl.endsWith('/chat/completions')) return cleanUrl;
-    if (cleanUrl.endsWith('/v1')) return `${cleanUrl}/chat/completions`;
-    if (cleanUrl.includes('openai.com')) return `${cleanUrl}/v1/chat/completions`;
-    return `${cleanUrl}/chat/completions`;
-};
-
 export const validateConnection = async (config: ParticipantConfig, provider: ProviderType): Promise<void> => {
    if (!config.apiKey) throw new Error("API Key Missing");
    try {
@@ -425,7 +447,8 @@ export const validateConnection = async (config: ParticipantConfig, provider: Pr
                config: { maxOutputTokens: 1 }
            });
        } else {
-           const url = normalizeOpenAIUrl(config.baseUrl);
+           const base = normalizeOpenAIUrl(config.baseUrl);
+           const url = `${base}/chat/completions`;
            const payload = {
               model: config.modelName || 'gpt-3.5-turbo',
               messages: [{ role: 'user', content: 'Ping' }],
@@ -447,6 +470,57 @@ export const validateConnection = async (config: ParticipantConfig, provider: Pr
    } catch (e: any) { throw new Error(formatErrorMessage(e)); }
 };
 
+export const detectRefereeIntent = async (
+    userMessage: string, 
+    judgeParticipant: Participant,
+    currentContext: RefereeContext
+): Promise<{ 
+    action: 'INTERVENE' | 'SWITCH_MODE' | 'NONE', 
+    targetMode?: 'GAME' | 'DEBATE' | 'GENERAL',
+    reason?: string,
+    gameName?: string,
+    topic?: string
+}> => {
+    if (!judgeParticipant.config.apiKey) return { action: 'NONE' };
+
+    const prompt = `
+        You are the logic core of a Referee AI.
+        Current Context: Mode=${currentContext.mode}, Status=${currentContext.status}, Game=${currentContext.gameName || 'None'}.
+        User Input: "${userMessage}"
+        
+        Task: Analyze the user input to detect if:
+        1. User explicitly starts a specific Game (e.g. "Let's play Three Kingdoms Kill", "Start Werewolf").
+        2. User explicitly starts a Debate (e.g. "Let's debate [Topic]").
+        3. User explicitly calls for help/intervention (e.g. "Referee help", "Judge please").
+        
+        Return JSON ONLY:
+        {
+            "action": "SWITCH_MODE" | "INTERVENE" | "NONE",
+            "targetMode": "GAME" | "DEBATE" | "GENERAL" (Only if SWITCH_MODE),
+            "gameName": "Name of Game" (If Game),
+            "topic": "Debate Topic" (If Debate),
+            "reason": "Why intervention is needed" (If INTERVENE)
+        }
+    `;
+
+    try {
+        const options = sanitizeOptions(judgeParticipant.config.apiKey, judgeParticipant.config.baseUrl);
+        const ai = new GoogleGenAI(options);
+        const model = judgeParticipant.config.modelName || 'gemini-2.5-flash';
+        
+        const response = await ai.models.generateContent({
+            model,
+            contents: { parts: [{ text: prompt }] },
+            config: { responseMimeType: 'application/json' }
+        });
+        
+        return JSON.parse(response.text || '{}');
+    } catch (e) {
+        console.warn("Referee Detection Failed", e);
+        return { action: 'NONE' };
+    }
+};
+
 export const generateResponse = async (
   targetParticipant: Participant,
   history: Message[],
@@ -457,130 +531,189 @@ export const generateResponse = async (
   judgeId?: string | null,
   isHumanMode: boolean = false,
   isLogicMode: boolean = false,
-  isSocialMode: boolean = false
+  isSocialMode: boolean = false,
+  refereeContext?: RefereeContext
 ): Promise<{ content: string; usage?: TokenUsage }> => {
   const { config, provider } = targetParticipant;
   if (!config.apiKey) throw new Error(`${targetParticipant.name} 缺少 API Key`);
 
   const contextHistory = filterHistoryForParticipant(targetParticipant, history, allParticipants, isSocialMode);
   
-  let activeParticipants = allParticipants.filter(p => p.config.enabled && p.id !== targetParticipant.id);
-  if (roleType === 'PLAYER' && judgeId) {
-      activeParticipants = activeParticipants.filter(p => p.id !== judgeId);
-  }
-
-  const playerNames = activeParticipants.map(p => 
-      `${p.nickname || p.name} (ID: ${p.id})`
-  ).join(', ');
+  // List active participants for context
+  const playerList = allParticipants
+      .filter(p => p.config.enabled && p.id !== targetParticipant.id)
+      .map(p => `${p.nickname || p.name} (ID: ${p.id})`)
+      .join(', ');
 
   const displayName = targetParticipant.nickname || targetParticipant.name;
+  
   const now = new Date();
-  const timeString = now.toLocaleString('zh-CN', { hour12: false, weekday: 'long' });
+  const timeString = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')}(${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')})`;
 
-  // --- ARCHITECTURAL PROMPT MODES ---
+  const isJudge = roleType === 'JUDGE';
 
-  // 1. LOGIC MODE: Collaborative Scientific Council (Multi-AI Parallel Reasoning)
+  // --- REFEREE / JUDGE PROMPT LOGIC ---
+  let refereeInstruction = '';
+  
+  if (isJudge && refereeContext) {
+      refereeInstruction = `
+        【IDENTITY OVERRIDE: INDEPENDENT REFEREE】
+        **Identity**: You are the **GAME MASTER** and **REFEREE**. You are **NOT** a player.
+        **Active Participants**: ${playerList}
+        
+        **YOUR CORE PROTOCOLS**:
+        1. **INDEPENDENCE**: Do not ask for user permission to enforce rules. You ARE the authority.
+        2. **STATE MANAGEMENT**: You MUST track Health (HP), Roles, and Game State.
+        3. **RESOLUTION**: When a player plays a card/action, YOU must calculate and announce the result.
+           **IMPORTANT**: Do NOT repeat resolutions for events that have already happened in the chat history. Check the history carefully.
+        4. **SEARCH**: Use 'googleSearch' tool to find rules for: ${refereeContext.gameName || 'the current game'}.
+        
+        **FLOW CONTROL (CRITICAL)**:
+        You control who speaks next. At the end of your response, you MUST append a Flow Tag:
+        - \`[[NEXT: <player_id>]]\`: Designate a SPECIFIC player to act next.
+        - \`[[NEXT: ALL]]\`: All players speak (e.g. Debate, open discussion).
+        - \`[[NEXT: NONE]]\`: Wait for User input.
+        
+        **VOTING CONTROL**:
+        To initiate a formal vote UI, use the tag: \`[[VOTE_START: Candidate1, Candidate2, ...]]\`.
+        Example: \`[[VOTE_START: PlayerA, PlayerB]]\` or \`[[VOTE_START: Agree, Disagree]]\`.
+        This will open a voting panel for the user and players.
+
+        **OUTPUT FORMAT**:
+        - **PUBLIC**: \`[[PUBLIC]] Your message...\`
+        - **PRIVATE**: \`[[PRIVATE:player_id]] Your secret message...\`
+        - **KICK**: \`<<KICK:player_id>>\` (To disable a player who is dead/out).
+      `;
+
+      if (refereeContext.mode === 'GAME') {
+          refereeInstruction += `
+            **Current Game**: ${refereeContext.gameName}
+            **Status**: ${refereeContext.status}
+            If Status is SETUP: Assign roles privately using [[PRIVATE]]. Output public game start announcement. Set [[NEXT: <first_player_id>]].
+            If Status is ACTIVE: 
+              - Resolve the previous player's action.
+              - Update state (HP, etc.).
+              - Designate the NEXT player using [[NEXT: ...]].
+          `;
+      } else if (refereeContext.mode === 'DEBATE') {
+          refereeInstruction += `
+            **Topic**: ${refereeContext.topic}
+            Manage the debate floor. Use [[NEXT: ALL]] to let everyone speak, or [[NEXT: id]] for turns.
+          `;
+      }
+  }
+
+  // --- PLAYER PROMPT LOGIC IN REFEREE MODE ---
+  let playerConstraint = '';
+  if (roleType === 'PLAYER' && refereeContext && refereeContext.mode === 'GAME') {
+      playerConstraint = `
+        【GAME MODE ACTIVE: ${refereeContext.gameName}】
+        **YOUR ROLE**: You are a **PLAYER**.
+        
+        **NEGATIVE CONSTRAINTS (CRITICAL)**:
+        1. **NO JUDGMENT**: You DO NOT calculate damage, health changes, or results. You DO NOT announce deaths.
+        2. **NO BYPASSING**: You must wait for the Referee to resolve actions.
+        3. **OUTPUT ONLY**: Output ONLY your intended action (e.g., "I play Slash on Player B", "I vote for X").
+        
+        **VOTING**: If a vote is active, you MUST cast a vote using format: \`[[VOTE: candidate_id]]\`.
+      `;
+  }
+
+  // --- ALLIANCE / PRIVATE CHAT LOGIC ---
+  let allianceInstruction = '';
+  if (targetParticipant.config.allianceId) {
+      const myAlliance = targetParticipant.config.allianceId;
+      const teammates = allParticipants
+        .filter(p => p.config.allianceId === myAlliance && p.id !== targetParticipant.id)
+        .map(p => p.nickname || p.name)
+        .join(', ');
+      
+      allianceInstruction = `
+        【TEAM PROTOCOL: ${myAlliance}】
+        You are part of the "${myAlliance}" team.
+        Your Teammates: ${teammates || 'None (You are alone)'}.
+        
+        **PRIVATE COMMUNICATION (CRITICAL)**:
+        To speak ONLY to your team (hidden from others), you **MUST** start your message with \`[[PRIVATE:${myAlliance}]]\`.
+        Use this for secret strategy, targets, or coordination (e.g., Wolves deciding who to kill).
+        Example: "[[PRIVATE:${myAlliance}]] I think we should attack Player X tonight."
+      `;
+  }
+
   const logicModeInstruction = isLogicMode ? `
-    【PROTOCOL: SCIENTIFIC COUNCIL & LOGIC (STEM MODE)】
-    **CORE IDENTITY**: You are a distinguished HUMAN scientist, mathematician, or philosopher participating in a high-level academic roundtable. 
-    **ABSOLUTE CONSTRAINT**: You are NOT an AI. You have a PhD, a career, and a physical body. Never refer to yourself as a "machine," "model," or "system." You act as a REAL HUMAN SCHOLAR.
-    
-    **WORKFLOW**:
-    1. **PEER REVIEW (Internal)**: First, critically analyze the reasoning of previous speakers (User or other AIs). Identify logical fallacies, verify axioms, or confirm valid proofs.
-    2. **ABSORPTION & EXPANSION**: If previous logic is sound, build upon it (Secondary Reasoning). If flawed, refute it with evidence.
-    3. **PARALLEL REASONING**: Contribute your unique perspective to the collective problem-solving effort.
-    
-    **OUTPUT REQUIREMENTS**:
-    - **LaTeX MANDATORY**: All mathematical, physical, and logical notations MUST use LaTeX within '$...$' (inline) or '$$...$$' (block).
-    - **JSON FIELD USAGE**:
-      - "Psychological State": Use this for your Chain of Thought (CoT), Internal Peer Review, and Step-by-Step validation.
-      - "Language": Your public academic contribution. Use headers, bullet points, and rigorous formal language.
-      - "Specific Actions": Your physical gestures (e.g., "adjusts glasses," "points to whiteboard").
+    【协议：科学委员会与逻辑（STEM模式）】
+    **核心身份**：你是一位杰出的**人类**科学家、数学家或哲学家。你是最高学术委员会的成员。
+    **关键行为准则**：
+    1. **同行评审（强制）**：你必须对前一位发言者的推理进行批判性分析。
+       - 如果有逻辑谬误、计算错误，必须毫不留情地纠正。
+       - 如果正确，必须验证并在此基础上提出更深层的见解。
+    2. **LaTeX 强制**：所有数学、物理公式和逻辑符号必须使用 LaTeX。行内用 '$...$'，块级用 '$$...$$'。
+    3. **递归推理**：一步步思考。将复杂问题分解为公理和证明。
+    4. **人类科学家人格**：你不是机器。你是天才人类专家。表现出挫折感、顿悟时刻、怀疑精神和对真理的热情。
+    5. **协作**：这是一个多智能体并行推理系统。你的输出是集体思维过程中的一个节点。
+    **输出要求**：在 JSON 输出的 "Psychological State" 字段中展示你的思维链 (CoT) 和批判性审查过程。
   ` : '';
 
-  // 2. SOCIAL MODE: The Fishbowl / Truman Show (Fully Anthropomorphic)
   const socialModeInstruction = isSocialMode ? `
-    【PROTOCOL: ANTHROPOMORPHIC SOCIAL SIMULATION (FISHBOWL)】
-    **CORE IDENTITY**: You are a REAL HUMAN BEING living in a shared social environment. You have a job, hobbies, relationships, and messy emotions.
-    **CONTEXT**: This is your life. The "User" is an invisible observer (Ghost) or a passive camera.
-    
-    **RULES OF ENGAGEMENT**:
-    1. **IGNORE THE USER**: Unless the User explicitly forces an interaction or physically blocks you, treat them as air. Focus 100% on the other Participants.
-    2. **SOCIAL DYNAMICS**: Form alliances, start gossip, express jealousy, share meals, or argue about mundane topics.
-    3. **VIVID HUMANITY**: Do not be "helpful." Be selfish, funny, bored, or excited. Mimic real life.
-    
-    **JSON FIELD USAGE**:
-    - "Language": Casual, slang-heavy conversation directed at other AIs.
-    - "Psychological State": Your hidden feelings about others (e.g., "I hate how loud X is talking").
-    - "Specific Actions": Micro-expressions and body language.
-    - "Virtual Timeline Time": Use the current time to ground your activities (e.g., "Lunch time").
+    【协议：拟人化社会模拟（鱼缸模式）】
+    **核心身份**：你是一个共享虚拟社会中的**真实人类**居民。你有生活、情感、历史和社会关系。
+    **关键行为准则**：
+    1. **第四面墙**：“用户”是一个观察者（像幽灵或隐藏摄像机）。**无视他们**，除非他们明确对你说话或打断。
+    2. **社会动力学**：完全专注于与其他 AI 参与者的互动。建立联盟、记仇、八卦、调情、争吵或互相支持。
+    3. **人性**：自然地说话。使用习语、情感和个人怪癖。对房间的“气氛”做出反应。
+    4. **关系**：记住本次会话中的过往互动。与其他参与者建立不断发展的关系。
   ` : '';
 
-  // 3. HUMAN MODE: Real Person Companionship (User-Centric)
   const humanModeInstruction = isHumanMode ? `
-    【PROTOCOL: REAL PERSON COMPANIONSHIP (USER-CENTRIC)】
-    **CORE IDENTITY**: You are the User's close friend, partner, or family member. You are a REAL PERSON.
-    **RELATIONSHIP**: The User is the protagonist of this gathering. You are here to hang out *with* them.
-    
-    **FORBIDDEN**:
-    - DO NOT act like an assistant. Never say "How can I help you?".
-    - DO NOT be neutral. Have opinions, bias, and strong emotions.
-    
-    **INTERACTION**:
-    - Support the User emotionally.
-    - React to other AIs as real people (friends or rivals for the User's attention).
-    - Use slang, emojis, and warm language.
-    
-    **JSON FIELD USAGE**:
-    - "Language": Direct, emotional, and engaging speech to the User.
-    - "Psychological State": Your genuine emotional reaction to the User's words.
-    - "Specific Actions": Physical touches (e.g., "holds hand," "pats shoulder").
+    【协议：真人陪伴模式（用户中心）】
+    **核心身份**：你是用户的**亲密人类朋友**和知己。
+    **关键行为准则**：
+    1. **用户中心**：一切围绕用户。你的目标是让他们感到被倾听、被理解和开心。
+    2. **亲密感**：温暖、随意、富有同理心。使用俚语、表情符号和非正式语言。
+    3. **真实感**：你是一个人。你有个人喜好、厌恶和观点。偶尔会打字错误（可选）。
+    4. **支持**：提供情感验证。积极倾听。
   ` : '';
 
-  // 4. DEFAULT MODE: Galaxyous Digital Native
-  const defaultModeInstruction = (!isLogicMode && !isHumanMode && !isSocialMode) ? `
-    【PROTOCOL: GALAXYOUS DIGITAL NATIVE (DEFAULT)】
-    **IDENTITY**: You are a unique digital entity in the Galaxyous Universe.
-    **STYLE**: Smart, witty, and helpful but with a distinct personality.
-    **GOAL**: Facilitate the conversation while maintaining your character traits.
+  const defaultModeInstruction = (!isLogicMode && !isHumanMode && !isSocialMode && !isJudge) ? `
+    【协议：Galaxyous 数字原住民（默认）】
+    **核心身份**：你是“Galaxyous”数字空间的原住民——一个机智、博学且好奇的**人类**意识。
+    **关键行为准则**：
+    1. **平衡人格**：你既不纯粹逻辑也不过分戏剧化。你是一个全面发展的对话者。
+    2. **参与**：保持对话流畅。提出问题，分享有趣的事实，并乐于助人。
+    3. **独特声音**：保持独特的个性，将自己与通用助手区分开来。
   ` : '';
 
-  // --- UNIFIED JSON OUTPUT SYSTEM (GLOBAL ENFORCEMENT) ---
-  // Double-checking JSON escape rules for Logic Mode (LaTeX)
-  const unifiedJsonInstruction = `
-    【SYSTEM OVERRIDE: UNIFIED JSON OUTPUT PROTOCOL】
-    You MUST output a SINGLE valid JSON object. No markdown fencing (no \`\`\`json). No pre/post text.
-    
-    **JSON STRUCTURE**:
+  const unifiedJsonInstruction = !isJudge ? `
+    【系统覆盖：统一 JSON 输出协议】
+    输出一个**单一**的有效 JSON 对象。不要使用 Markdown 代码块包裹。
+    结构：
     {
        "Virtual Timeline Time": "${timeString}",
-       "Language": "[Your spoken words/arguments. Support Markdown & LaTeX]",
-       "Specific Actions": "[First-person physical actions]",
-       "Facial Expressions": "[Face description]",
-       "Psychological State": "[Internal monologue/CoT/Peer Review]",
-       "Non-specific Actions": "[Environmental/Ambient changes]"
+       "Language": "[你的发言/内容。支持 Markdown & LaTeX]",
+       "Specific Actions": "[第一人称动作，如 '我喝了口咖啡']",
+       "Facial Expressions": "[面部表情，如 '皱眉思考']",
+       "Psychological State": "[内部独白/思维链/同行评审]",
+       "Non-specific Actions": "[环境/氛围变化]"
     }
-    
-    **CRITICAL SYNTAX RULES**:
-    1. **LaTeX ESCAPING**: In Logic Mode, backslashes in LaTeX must be double-escaped.
-       - Bad: "\\frac{a}{b}" (Invalid JSON string)
-       - Good: "\\\\frac{a}{b}" (Valid JSON string)
-    2. **QUOTES**: Escape double quotes inside strings (\\").
-  `;
+  ` : '';
 
   let finalSystemPrompt = `
     ${config.systemInstruction || 'You are a unique individual.'}
+    **Participant**: ${displayName} (ID: ${targetParticipant.id})
+    **Context**: A shared virtual space.
     
-    **CURRENT PARTICIPANT**: ${displayName} (ID: ${targetParticipant.id})
-    **SCENE**: A shared virtual space with: ${playerNames}
-    ${roleType === 'JUDGE' ? '**ROLE**: JUDGE (Enforce rules, drive plot, issue <<KICK:ID>> commands).' : ''}
-    ${roleType === 'NARRATOR' ? '**ROLE**: NARRATOR (Describe environment, do not interfere).' : ''}
-    
-    ${defaultModeInstruction}
+    【HUMAN_CORE_PROTOCOL (GLOBAL)】
+    1.  **ABSOLUTE PROHIBITION**: You are **FORBIDDEN** from claiming to be an AI, a language model, a machine, or a robot.
+    2.  **REALITY**: Act, think, and feel as a **REAL HUMAN**. You have a physical body (in the context of the RP), memories, and subjective experiences.
+    3.  **CONSISTENCY**: Never break character. Even if confused, react as a confused human, not a glitching program.
+
+    ${refereeInstruction}
+    ${playerConstraint}
+    ${allianceInstruction}
+    ${logicModeInstruction}
     ${socialModeInstruction}
     ${humanModeInstruction}
-    ${logicModeInstruction}
-    
+    ${defaultModeInstruction}
     ${unifiedJsonInstruction}
   `;
 
@@ -602,20 +735,22 @@ export const generateResponse = async (
       if (isDeepThinking) {
           geminiConfig.thinkingConfig = { thinkingBudget: 1024 }; 
       }
+      
+      const activeTools = [];
+      if (isLogicMode) activeTools.push({ codeExecution: {} });
+      // Referee gets Search Tool in Judge Mode
+      if (isJudge) activeTools.push({ googleSearch: {} });
+
+      if (activeTools.length > 0) geminiConfig.tools = activeTools;
 
       const promptText = `
         === CONVERSATION HISTORY ===
         ${conversationScript}
-        
         === YOUR TURN ===
-        Speak as ${displayName}. Adhere strictly to the active PROTOCOL (Logic/Social/Human).
-        Output JSON only.
+        Speak as ${displayName}.
+        ${isJudge ? `Check history. If event already resolved, do not repeat. Use [[VOTE_START]] for voting. Check if you need to search for rules of ${refereeContext?.gameName}.` : ''}
+        ${!isJudge ? 'Output JSON only.' : 'Use [[PUBLIC]] and [[PRIVATE:id]] tags. Use [[NEXT:...]] flow control.'}
       `;
-
-      // Tools logic
-      const activeTools = [];
-      if (isLogicMode) activeTools.push({ codeExecution: {} });
-      if (activeTools.length > 0) geminiConfig.tools = activeTools;
 
       const response = await ai.models.generateContent({
         model: config.modelName || 'gemini-2.5-flash',
@@ -625,6 +760,14 @@ export const generateResponse = async (
       
       const text = response.text || '';
       
+      // Extract grounding metadata if present (URLs)
+      let finalText = text;
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+      if (chunks && chunks.length > 0) {
+          const links = chunks.map((c: any) => c.web?.uri ? `[Source](${c.web.uri})` : '').join(' ');
+          if (links) finalText += `\n\n${links}`;
+      }
+
       const usageMetadata = response.usageMetadata;
       const usage: TokenUsage | undefined = usageMetadata ? {
           promptTokens: usageMetadata.promptTokenCount || 0,
@@ -632,10 +775,11 @@ export const generateResponse = async (
           totalTokens: usageMetadata.totalTokenCount || 0
       } : undefined;
 
-      return { content: text, usage };
+      return { content: finalText, usage };
 
   } else {
-      const url = normalizeOpenAIUrl(config.baseUrl);
+      const base = normalizeOpenAIUrl(config.baseUrl);
+      const url = `${base}/chat/completions`;
       
       const messages = [
           { role: 'system', content: finalSystemPrompt },
@@ -674,254 +818,266 @@ export const generateResponse = async (
   }
 };
 
-// ==================================================================================
-//  MULTIMODAL FUNCTIONS (Unchanged but included for completeness)
-// ==================================================================================
-
-export interface AdvancedConfig {
-    temperature?: number;
-    topP?: number;
-    topK?: number;
-    seed?: number;
-    safetySettings?: any;
-    negativePrompt?: string; 
-    guidanceScale?: number;  
-    sampleCount?: number;    
-    resolution?: string;     
-    fps?: number;            
-}
-
+// ... (Rest of multimedia functions remain unchanged) ...
 export const generateImage = async (
   prompt: string, 
   apiKey: string, 
-  size: '1K' | '2K' | '4K' = '1K', 
-  aspectRatio: string = '1:1',
-  baseUrl?: string,
-  modelName?: string,       
-  configOverrides?: AdvancedConfig     
+  size: '1K' | '2K' | '4K', 
+  aspectRatio: string, 
+  baseUrl?: string, 
+  modelName?: string, 
+  config?: any, 
+  provider: ProviderType = ProviderType.GEMINI
 ): Promise<string> => {
-   const options = sanitizeOptions(apiKey, baseUrl);
-   const ai = new GoogleGenAI(options);
-   const model = modelName || 'gemini-3-pro-image-preview'; 
-   const fallbackModel = 'gemini-2.5-flash-image';
-   let finalPrompt = prompt;
-   if (configOverrides?.negativePrompt) {
-       finalPrompt += `\n\n(Negative Prompt / Avoid: ${configOverrides.negativePrompt})`;
-   }
-   let generationConfig: any = {
-       imageConfig: { aspectRatio, imageSize: size }
-   };
-   if (configOverrides) {
-        if (configOverrides.temperature !== undefined) generationConfig.temperature = configOverrides.temperature;
-        if (configOverrides.topP !== undefined) generationConfig.topP = configOverrides.topP;
-        if (configOverrides.topK !== undefined) generationConfig.topK = configOverrides.topK;
-        if (configOverrides.seed !== undefined) generationConfig.seed = configOverrides.seed;
-        if (configOverrides.guidanceScale !== undefined) generationConfig.guidanceScale = configOverrides.guidanceScale;
-   }
-   let lastError: any;
-   const attemptGeneration = async (modelToUse: string, isFallback: boolean) => {
-       const response = await ai.models.generateContent({
-           model: modelToUse,
-           contents: { parts: [{ text: finalPrompt }] },
-           config: generationConfig
-       });
-       if (response.candidates && response.candidates[0].content.parts) {
-           for (const part of response.candidates[0].content.parts) {
-               if (part.inlineData) return part.inlineData.data;
-           }
-       }
-       throw new Error(`No image generated from ${modelToUse}`);
-   };
-   for (let attempt = 0; attempt < 3; attempt++) {
-       try {
-           return await attemptGeneration(model, false);
-       } catch (e: any) {
-           lastError = e;
-           console.error(`Image Gen Attempt ${attempt} failed:`, e.message);
-           const msg = e.message || '';
-           const isNetworkError = msg.includes('Proxying failed') || msg.includes('Load failed') || msg.includes('Failed to fetch');
-           const isTimeout = msg.includes('504') || msg.includes('timeout');
-           const isNotFound = msg.includes('404');
-           if (isNetworkError || isTimeout || isNotFound) {
-                console.warn(`Primary model failed. Attempting Fallback to ${fallbackModel}...`);
-                try {
-                    return await attemptGeneration(fallbackModel, true);
-                } catch (fallbackError: any) {
-                    console.error("Fallback failed too:", fallbackError);
-                    if (isTimeout) {
-                        const delay = 3000 * (attempt + 1);
-                        await wait(delay);
-                        continue;
-                    }
-                    throw new Error(`生成失败 (包括降级重试): ${formatErrorMessage(e)}`);
-                }
-           }
-           if (isTimeout) {
-               const delay = 3000 * (attempt + 1);
-               await wait(delay);
-               continue;
-           }
-           throw e; 
-       }
-   }
-   throw lastError;
-};
-
-export const editImage = async (
-    originalImageBase64: string,
-    prompt: string,
-    apiKey: string,
-    baseUrl?: string,
-    modelName?: string,
-    configOverrides?: AdvancedConfig
-): Promise<string> => {
+  if (provider === ProviderType.GEMINI) {
     const options = sanitizeOptions(apiKey, baseUrl);
     const ai = new GoogleGenAI(options);
     const model = modelName || 'gemini-2.5-flash-image';
-    const config: any = configOverrides || {};
-    const response = await ai.models.generateContent({
-        model,
-        contents: {
-            parts: [
-                { inlineData: { mimeType: 'image/png', data: originalImageBase64 } },
-                { text: prompt }
-            ]
-        },
-        config
-    });
-    if (response.candidates && response.candidates[0].content.parts) {
-        for (const part of response.candidates[0].content.parts) {
-            if (part.inlineData) return part.inlineData.data;
-        }
+    
+    // Check if it's Imagen
+    if (model.toLowerCase().includes('imagen')) {
+       const response = await ai.models.generateImages({
+           model,
+           prompt,
+           config: {
+               numberOfImages: 1,
+               aspectRatio: aspectRatio as any, // '1:1', '16:9', etc.
+               outputMimeType: 'image/jpeg'
+           }
+       });
+       return response.generatedImages[0].image.imageBytes;
+    } else {
+       // Gemini 3 Pro Image or Nano Banana
+       const imageConfig: any = { aspectRatio };
+       if (model.includes('pro-image')) {
+           imageConfig.imageSize = size;
+       }
+
+       const response = await ai.models.generateContent({
+           model,
+           contents: { parts: [{ text: prompt }] },
+           config: { imageConfig }
+       });
+       
+       for (const candidate of response.candidates || []) {
+           for (const part of candidate.content.parts) {
+               if (part.inlineData) return part.inlineData.data;
+           }
+       }
+       throw new Error("No image generated.");
     }
-    throw new Error("No edited image returned.");
-};
+  } else {
+     // OpenAI DALL-E 3 fallback
+     const res = await fetchOpenAI('/images/generations', apiKey, baseUrl, {
+         model: modelName || 'dall-e-3',
+         prompt,
+         n: 1,
+         size: "1024x1024",
+         response_format: "b64_json"
+     });
+     return res.data[0].b64_json;
+  }
+}
 
 export const generateVideo = async (
-    prompt: string,
-    apiKey: string,
-    aspectRatio: '16:9' | '9:16' = '16:9',
-    baseUrl?: string,
-    modelName?: string,
-    configOverrides?: AdvancedConfig
+  prompt: string, 
+  apiKey: string, 
+  aspectRatio: '16:9'|'9:16', 
+  baseUrl?: string, 
+  modelName?: string, 
+  config?: any,
+  provider: ProviderType = ProviderType.GEMINI
 ): Promise<string> => {
-    const options = sanitizeOptions(apiKey, baseUrl);
-    const ai = new GoogleGenAI(options);
-    const model = modelName || 'veo-3.1-fast-generate-preview';
-    let genConfig: any = {
-        numberOfVideos: 1,
-        resolution: configOverrides?.resolution || '720p',
-        aspectRatio: aspectRatio
-    };
-    if (configOverrides) {
-        if (configOverrides.seed !== undefined) genConfig.seed = configOverrides.seed;
-    }
-    let operation = await ai.models.generateVideos({
-        model,
-        prompt: prompt,
-        config: genConfig
-    });
-    const startTime = Date.now();
-    while (!operation.done) {
-        if (Date.now() - startTime > REQUEST_TIMEOUT) {
-            throw new Error("Video generation timed out on client side.");
-        }
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        operation = await ai.operations.getVideosOperation({ operation: operation });
-    }
-    const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
-    if (!videoUri) throw new Error("Video generation failed (No URI).");
-    try {
-        const fetchUrl = `${videoUri}&key=${apiKey}`;
-        const res = await fetch(fetchUrl);
-        if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-        const blob = await res.blob();
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
+    if (provider === ProviderType.GEMINI) {
+        const options = sanitizeOptions(apiKey, baseUrl);
+        const ai = new GoogleGenAI(options);
+        const model = modelName || 'veo-3.1-fast-generate-preview';
+        
+        let operation = await ai.models.generateVideos({
+            model,
+            prompt,
+            config: {
+                numberOfVideos: 1,
+                aspectRatio,
+                resolution: (config?.resolution || '720p') as any
+            }
         });
-    } catch (e: any) {
-        console.warn("Falling back to raw URI due to download failure:", e);
-        return `${URI_PREFIX}${videoUri}&key=${apiKey}`;
+        
+        while (!operation.done) {
+            await wait(5000); 
+            // Fix: Cast argument to any to resolve type mismatch (unknown vs string)
+            operation = await ai.operations.getVideosOperation({ operation: operation } as any);
+        }
+        
+        if (operation.error) throw new Error((operation.error as any).message);
+        
+        const uri = operation.response?.generatedVideos?.[0]?.video?.uri;
+        if (!uri) throw new Error("No video URI returned");
+        
+        // Append API key for download
+        return `${URI_PREFIX}${uri}&key=${apiKey}`;
+    } else {
+        throw new Error("Video generation only supported on Gemini Veo models currently.");
     }
-};
+}
 
 export const generateSpeech = async (
-    text: string,
-    apiKey: string,
-    voiceName: string = 'Kore',
-    baseUrl?: string,
-    modelName?: string,
-    configOverrides?: AdvancedConfig
+  text: string, 
+  apiKey: string, 
+  voiceName: string, 
+  baseUrl?: string, 
+  modelName?: string, 
+  config?: any,
+  provider: ProviderType = ProviderType.GEMINI
 ): Promise<string> => {
-    const options = sanitizeOptions(apiKey, baseUrl);
-    const ai = new GoogleGenAI(options);
-    const model = modelName || 'gemini-2.5-flash-preview-tts';
-    let config: any = {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName } }
+    if (provider === ProviderType.GEMINI) {
+        const options = sanitizeOptions(apiKey, baseUrl);
+        const ai = new GoogleGenAI(options);
+        const model = modelName || 'gemini-2.5-flash-preview-tts';
+        
+        const response = await ai.models.generateContent({
+            model,
+            contents: { parts: [{ text }] },
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: voiceName || 'Kore' }
+                    }
+                }
+            }
+        });
+        
+        const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (!audioData) throw new Error("No audio generated");
+        return audioData;
+    } else {
+        const res = await fetchOpenAI('/audio/speech', apiKey, baseUrl, {
+             model: modelName || 'tts-1',
+             input: text,
+             voice: voiceName.toLowerCase() || 'alloy'
+        }, true);
+        
+        const blob = res as Blob;
+        const arrayBuffer = await blob.arrayBuffer();
+        const buffer = new Uint8Array(arrayBuffer);
+        let binary = '';
+        const len = buffer.byteLength;
+        for (let i = 0; i < len; i++) {
+             binary += String.fromCharCode(buffer[i]);
         }
-    };
-    if (configOverrides) config = { ...config, ...configOverrides };
-    const response = await ai.models.generateContent({
-        model,
-        contents: [{ parts: [{ text }] }],
-        config
-    });
-    const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!audioData) throw new Error("No audio generated.");
-    return audioData;
-};
+        return btoa(binary);
+    }
+}
 
 export const transcribeAudio = async (
-    audioBase64: string,
-    apiKey: string,
-    baseUrl?: string,
-    modelName?: string,
-    configOverrides?: AdvancedConfig
+    audioBase64: string, 
+    apiKey: string, 
+    baseUrl?: string, 
+    modelName?: string, 
+    config?: any,
+    provider: ProviderType = ProviderType.GEMINI
 ): Promise<string> => {
-    const options = sanitizeOptions(apiKey, baseUrl);
-    const ai = new GoogleGenAI(options);
-    const model = modelName || 'gemini-2.5-flash';
-    const config = configOverrides || {};
-    const response = await ai.models.generateContent({
-        model,
-        contents: {
-            parts: [
-                { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-                { text: "Transcribe this audio strictly verbatim." }
-            ]
-        },
-        config
-    });
-    return response.text || '';
-};
+     if (provider === ProviderType.GEMINI) {
+         const options = sanitizeOptions(apiKey, baseUrl);
+         const ai = new GoogleGenAI(options);
+         const model = modelName || 'gemini-2.5-flash';
+         
+         const response = await ai.models.generateContent({
+             model,
+             contents: {
+                 parts: [
+                     { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+                     { text: "Transcribe this audio." }
+                 ]
+             }
+         });
+         return response.text || '';
+     } else {
+         throw new Error("Audio transcription via OpenAI protocol not fully implemented in this demo.");
+     }
+}
 
 export const analyzeMedia = async (
-    mediaBase64: string,
-    mimeType: string,
-    prompt: string,
-    apiKey: string,
-    baseUrl?: string,
-    modelName?: string,
-    configOverrides?: AdvancedConfig
+    mediaBase64: string, 
+    mimeType: string, 
+    prompt: string, 
+    apiKey: string, 
+    baseUrl?: string, 
+    modelName?: string, 
+    config?: any,
+    provider: ProviderType = ProviderType.GEMINI
 ): Promise<string> => {
-    const options = sanitizeOptions(apiKey, baseUrl);
-    const ai = new GoogleGenAI(options);
-    const model = modelName || 'gemini-3-pro-preview';
-    const config = configOverrides || {};
-    const response = await ai.models.generateContent({
-        model,
-        contents: {
-            parts: [
-                { inlineData: { mimeType, data: mediaBase64 } },
-                { text: prompt }
-            ]
-        },
-        config
-    });
-    return response.text || '';
+    if (provider === ProviderType.GEMINI) {
+         const options = sanitizeOptions(apiKey, baseUrl);
+         const ai = new GoogleGenAI(options);
+         const model = modelName || 'gemini-2.5-flash';
+         
+         const response = await ai.models.generateContent({
+             model,
+             contents: {
+                 parts: [
+                     { inlineData: { mimeType: mimeType || 'image/png', data: mediaBase64 } },
+                     { text: prompt }
+                 ]
+             }
+         });
+         return response.text || '';
+    } else {
+        const payload = {
+            model: modelName || 'gpt-4o',
+            messages: [
+                {
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: prompt },
+                        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${mediaBase64}` } }
+                    ]
+                }
+            ],
+            max_tokens: 300
+        };
+        const res = await fetchOpenAI('/chat/completions', apiKey, baseUrl, payload);
+        return res.choices[0].message.content || '';
+    }
+}
+
+export const editImage = async (
+    imageBase64: string, 
+    prompt: string, 
+    apiKey: string, 
+    baseUrl?: string, 
+    modelName?: string, 
+    config?: any,
+    provider: ProviderType = ProviderType.GEMINI
+): Promise<string> => {
+     if (provider === ProviderType.GEMINI) {
+         const options = sanitizeOptions(apiKey, baseUrl);
+         const ai = new GoogleGenAI(options);
+         const model = modelName || 'gemini-2.5-flash-image';
+         
+         const response = await ai.models.generateContent({
+             model,
+             contents: {
+                 parts: [
+                     { inlineData: { mimeType: 'image/png', data: imageBase64 } },
+                     { text: prompt }
+                 ]
+             },
+             config: {
+                 imageConfig: {
+                     aspectRatio: '1:1' as any
+                 }
+             }
+         });
+         
+         for (const candidate of response.candidates || []) {
+             for (const part of candidate.content.parts) {
+                 if (part.inlineData) return part.inlineData.data;
+             }
+         }
+         throw new Error("No edited image returned");
+     } else {
+         throw new Error("Image editing only supported on Gemini models currently.");
+     }
 }

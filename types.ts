@@ -6,7 +6,7 @@ export enum ProviderType {
 
 export enum GameMode {
   FREE_CHAT = 'FREE_CHAT',
-  JUDGE_MODE = 'JUDGE_MODE',
+  JUDGE_MODE = 'JUDGE_MODE', // Now acts as "Referee Mode" container
   NARRATOR_MODE = 'NARRATOR_MODE'
 }
 
@@ -50,6 +50,7 @@ export interface Participant {
 export interface Message {
   id: string;
   senderId: string; // 'user' or participant.id
+  recipientId?: string; // If set, this message is PRIVATE and only visible to this recipient (and User/Referee)
   content: string; // Raw content containing [], {}, // markers
   images?: string[]; // Base64 strings
   videos?: string[]; // URL or Base64
@@ -61,6 +62,22 @@ export interface Message {
 export interface KickRequest {
   targetId: string;
   reason: string;
+}
+
+export interface VoteState {
+  isActive: boolean;
+  title: string;
+  candidates: string[]; // IDs or Options
+  votes: Record<string, string>; // VoterID -> CandidateID
+  result?: string;
+}
+
+export interface RefereeContext {
+  mode: 'GENERAL' | 'GAME' | 'DEBATE';
+  gameName?: string;
+  topic?: string;
+  status: 'IDLE' | 'SETUP' | 'ACTIVE';
+  lastDecision?: string;
 }
 
 export interface Session {
@@ -85,6 +102,10 @@ export interface Session {
   isLogicMode: boolean; 
   isSocialMode: boolean; 
   
+  // New Referee System
+  refereeContext?: RefereeContext;
+  votingState?: VoteState;
+
   tokenUsage: TokenUsage; // Track usage per session
 }
 
