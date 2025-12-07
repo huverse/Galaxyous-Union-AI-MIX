@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2, BarChart2, Wand2, RefreshCw, Hammer } from 'lucide-react';
+import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2, BarChart2, Wand2, RefreshCw, Hammer, Loader2, FileText } from 'lucide-react';
 import { DEFAULT_PARTICIPANTS, USER_ID } from './constants';
 import { Message, Participant, ParticipantConfig, GameMode, Session, ProviderType, TokenUsage, RefereeContext, VoteState } from './types';
 import ChatMessage from './components/ChatMessage';
@@ -1112,14 +1112,130 @@ const App: React.FC = () => {
       processPartyRound(activeSessionId, activeSession.messages, [], true);
   };
 
-  // ... (Rest of UI handlers: selection, share, etc. unchanged)
   // Re-declare for context
   const handleLongPress = (id: string) => { if (!selectionMode) { setSelectionMode(true); setSelectedMsgIds(new Set([id])); } };
   const toggleSelection = (id: string) => { setSelectedMsgIds(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; }); };
   const exitSelectionMode = () => { setSelectionMode(false); setSelectedMsgIds(new Set()); setShowShareModal(false); setShareResultUrl(null); setShareLinkUrl(null); };
   const handleDeleteSelected = () => { if (selectedMsgIds.size === 0) return; if (window.confirm(`Delete ${selectedMsgIds.size}?`)) { updateActiveSession({ messages: activeSession.messages.filter(m => !selectedMsgIds.has(m.id)) }); exitSelectionMode(); } };
-  const generateShareImage = async () => { /* ... */ };
-  const generateShareFile = (type: 'TEXT' | 'JSON') => { /* ... */ };
+  
+  // --- Share Logic ---
+  const generateShareFile = () => {
+    if (selectedMsgIds.size === 0) return;
+    
+    const selectedMsgs = activeSession.messages
+        .filter(m => selectedMsgIds.has(m.id))
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+    const textContent = selectedMsgs.map(m => {
+        const sender = participants.find(p => p.id === m.senderId);
+        const name = sender ? (sender.nickname || sender.name) : (m.senderId === USER_ID ? 'User' : m.senderId);
+        // Basic clean up of content for text file
+        const cleanContent = m.content.replace(/\[\[.*?\]\]/g, '').trim(); 
+        return `[${new Date(m.timestamp).toLocaleTimeString()}] ${name}:\n${cleanContent}\n`;
+    }).join('\n-------------------\n');
+
+    const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    setShareLinkUrl(url);
+    setShareType('TEXT');
+    setShareResultUrl(null);
+    setShowShareModal(true);
+  };
+
+  const generateShareImage = async () => {
+    if (selectedMsgIds.size === 0) return;
+    setIsGeneratingShare(true);
+    try {
+        // Create a temporary container for screenshot
+        const container = document.createElement('div');
+        const isDark = document.documentElement.classList.contains('dark') || document.body.classList.contains('dark');
+        
+        container.style.position = 'fixed';
+        container.style.top = '-10000px';
+        container.style.left = '0';
+        container.style.width = '600px'; 
+        container.style.backgroundColor = isDark ? '#000000' : '#f5f5f7';
+        container.style.color = isDark ? '#ffffff' : '#000000';
+        container.style.padding = '40px';
+        container.style.display = 'flex';
+        container.style.flexDirection = 'column';
+        container.style.gap = '16px';
+        container.style.zIndex = '-9999';
+
+        // Add Header
+        const header = document.createElement('div');
+        header.innerHTML = `
+          <h2 style="font-size:24px; font-weight:bold; margin-bottom:4px; font-family: sans-serif;">${activeSession.name}</h2>
+          <p style="font-size:12px; opacity:0.6; font-family: sans-serif;">Galaxyous Share</p>
+          <div style="width:100%; height:1px; background-color:${isDark ? '#333' : '#ddd'}; margin: 20px 0;"></div>
+        `;
+        container.appendChild(header);
+
+        const selectedMsgs = activeSession.messages
+            .filter(m => selectedMsgIds.has(m.id))
+            .sort((a, b) => a.timestamp - b.timestamp);
+
+        for (const msg of selectedMsgs) {
+            const originalEl = document.getElementById(`msg-${msg.id}`);
+            if (originalEl) {
+                const clone = originalEl.cloneNode(true) as HTMLElement;
+                
+                // Cleanup Styles for Snapshot
+                clone.style.margin = '0';
+                clone.style.transform = 'none';
+                clone.style.animation = 'none';
+                clone.style.transition = 'none';
+                
+                // Remove Selection Indicators (the checkbox/circle)
+                // In ChatMessage structure, it's the first child div with absolute positioning usually
+                const selectionIndicator = clone.querySelector('.absolute.top-6.z-20');
+                if (selectionIndicator) selectionIndicator.remove();
+                
+                // Reset Opacity/Scale caused by selection mode NOT being selected (though we only grab selected ones, logic applies)
+                const contentWrapper = clone.querySelector('div[class*="scale-95"]');
+                if (contentWrapper) {
+                    contentWrapper.classList.remove('opacity-50', 'grayscale', 'scale-95');
+                    contentWrapper.classList.add('scale-100');
+                    // Force opacity reset via style just in case
+                    (contentWrapper as HTMLElement).style.opacity = '1';
+                    (contentWrapper as HTMLElement).style.filter = 'none';
+                    (contentWrapper as HTMLElement).style.transform = 'none';
+                }
+
+                container.appendChild(clone);
+            }
+        }
+
+        // Footer
+        const footer = document.createElement('div');
+        footer.innerHTML = `
+           <div style="width:100%; height:1px; background-color:${isDark ? '#333' : '#ddd'}; margin: 20px 0;"></div>
+           <p style="font-size:12px; text-align:center; opacity:0.5; font-family: sans-serif;">Generated by Galaxyous AI</p>
+        `;
+        container.appendChild(footer);
+
+        document.body.appendChild(container);
+
+        // Render
+        const canvas = await html2canvas(container, {
+            backgroundColor: isDark ? '#000000' : '#f5f5f7',
+            scale: 2,
+            useCORS: true,
+            logging: false
+        });
+
+        document.body.removeChild(container);
+        setShareResultUrl(canvas.toDataURL('image/png'));
+        setShareLinkUrl(null);
+        setShowShareModal(true);
+
+    } catch (e) {
+        console.error("Screenshot failed", e);
+        alert("生成图片失败，请重试");
+    } finally {
+        setIsGeneratingShare(false);
+    }
+  };
 
   const activeCount = participants.filter(p => p.config.enabled).length;
   const isJudgeModeActive = activeSession.gameMode === GameMode.JUDGE_MODE;
@@ -1435,18 +1551,19 @@ const App: React.FC = () => {
                    <div className="w-px h-8 bg-slate-200 dark:bg-white/10 mx-2"></div>
                    
                    <button 
-                     onClick={() => { setShareResultUrl(null); generateShareFile('TEXT'); }}
-                     disabled={selectedMsgIds.size === 0}
-                     className="whitespace-nowrap px-3 py-2 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 rounded-lg font-medium text-xs flex items-center gap-1.5"
+                     onClick={generateShareImage}
+                     disabled={selectedMsgIds.size === 0 || isGeneratingShare}
+                     className="whitespace-nowrap px-3 py-2 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 rounded-lg font-medium text-xs flex items-center gap-1.5 hover:bg-slate-200 dark:hover:bg-white/20 transition-colors"
                    >
-                      <Copy size={14} /> 文本
+                      {isGeneratingShare ? <Loader2 size={14} className="animate-spin"/> : <ImagePlus size={14} />} 
+                      图片
                    </button>
                    <button 
-                     onClick={() => { setShareResultUrl(null); generateShareFile('JSON'); }}
+                     onClick={generateShareFile}
                      disabled={selectedMsgIds.size === 0}
-                     className="whitespace-nowrap px-3 py-2 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 rounded-lg font-medium text-xs flex items-center gap-1.5"
+                     className="whitespace-nowrap px-3 py-2 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 rounded-lg font-medium text-xs flex items-center gap-1.5 hover:bg-slate-200 dark:hover:bg-white/20 transition-colors"
                    >
-                      <FileJson size={14} /> JSON
+                      <FileText size={14} /> 文本
                    </button>
                    {/* ... */}
                 </div>
@@ -1678,7 +1795,7 @@ const App: React.FC = () => {
                     </div>
                  ) : shareLinkUrl ? (
                     <div className="p-8 bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-2xl text-center">
-                        <FileJson size={48} className="mx-auto text-blue-500 mb-4" />
+                        <FileText size={48} className="mx-auto text-blue-500 mb-4" />
                         <p className="text-slate-600 dark:text-slate-300 font-medium mb-2">文件已生成</p>
                         <p className="text-xs text-slate-400">格式: {shareType}</p>
                     </div>
