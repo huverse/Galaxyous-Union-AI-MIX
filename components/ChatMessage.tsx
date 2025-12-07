@@ -5,7 +5,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { Message, Participant } from '../types';
 import { USER_ID } from '../constants';
-import { Bot, User, BrainCircuit, Lock, Clapperboard, ShieldAlert, Gavel, BookOpen, CheckCircle2, Circle, Microscope, ChevronDown, ChevronUp, Clock, Smile, Activity, MapPin, Eye, EyeOff, ArrowRight } from 'lucide-react';
+import { Bot, User, BrainCircuit, Lock, Clapperboard, ShieldAlert, Gavel, BookOpen, CheckCircle2, Circle, Microscope, ChevronDown, ChevronUp, Clock, Smile, Activity, MapPin, Eye, EyeOff, ArrowRight, Globe, Link as LinkIcon, ExternalLink } from 'lucide-react';
 
 interface ChatMessageProps {
   message: Message;
@@ -180,6 +180,15 @@ const parseMessageContent = (text: string): Token[] => {
   return tokens;
 };
 
+// Helper: Safely convert metadata values to string to prevent React rendering crashes
+const safeStr = (val: any): string => {
+    if (val === undefined || val === null) return '';
+    if (typeof val === 'string') return val;
+    if (typeof val === 'number') return String(val);
+    if (typeof val === 'object') return JSON.stringify(val);
+    return String(val);
+};
+
 const ChatMessage: React.FC<ChatMessageProps> = ({ 
   message, sender, allParticipants, isSpecialRole, specialRoleType,
   selectionMode, isSelected, onSelect, onLongPress, isSocialMode
@@ -187,6 +196,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
   const isUser = message.senderId === USER_ID;
   const isSystem = message.senderId === 'SYSTEM';
   const isPrivate = !!message.recipientId;
+  const hasGrounding = message.groundingMetadata && message.groundingMetadata.groundingChunks && message.groundingMetadata.groundingChunks.length > 0;
   
   // Resolve Recipient for Private Messages
   let recipientName = 'Unknown';
@@ -203,6 +213,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
   const timerRef = useRef<number | null>(null);
   const isScrollingRef = useRef(false);
   const [isCotExpanded, setIsCotExpanded] = useState(false);
+  const [showSources, setShowSources] = useState(false);
 
   const handleTouchStart = () => {
     isScrollingRef.current = false;
@@ -354,6 +365,17 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                       <span>{recipientName}</span>
                   </div>
               )}
+              
+              {/* Grounding / Search Indicator Badge */}
+              {hasGrounding && (
+                   <button 
+                     onClick={(e) => { e.stopPropagation(); setShowSources(!showSources); }}
+                     className="flex items-center gap-1.5 bg-emerald-100 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded-md text-[10px] font-bold border border-emerald-200 dark:border-emerald-800/50 shadow-sm transition-colors cursor-pointer"
+                   >
+                       <Globe size={10} />
+                       <span>已联网搜索</span>
+                   </button>
+              )}
             </div>
           )}
 
@@ -390,12 +412,12 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                             
                             <div className="flex items-center gap-2 mb-4 text-xs font-mono text-slate-400">
                                 <Clock size={12} />
-                                <span>{m['Virtual Timeline Time'] || 'Unknown Time'}</span>
+                                <span>{safeStr(m['Virtual Timeline Time']) || 'Unknown Time'}</span>
                             </div>
 
                             <div className="mb-4 text-slate-800 dark:text-slate-100 text-base md:text-lg font-medium leading-relaxed markdown-body">
                                 <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                                  {m['Language'] || ''}
+                                  {safeStr(m['Language'])}
                                 </ReactMarkdown>
                             </div>
 
@@ -403,13 +425,13 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                 {m['Specific Actions'] && (
                                     <div className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/10 p-2 rounded-xl">
                                         <Clapperboard size={14} className="mt-0.5 shrink-0" />
-                                        <span>{m['Specific Actions']}</span>
+                                        <span>{safeStr(m['Specific Actions'])}</span>
                                     </div>
                                 )}
                                 {m['Facial Expressions'] && (
                                     <div className="flex items-start gap-2 text-xs text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/10 p-2 rounded-xl">
                                         <Smile size={14} className="mt-0.5 shrink-0" />
-                                        <span>{m['Facial Expressions']}</span>
+                                        <span>{safeStr(m['Facial Expressions'])}</span>
                                     </div>
                                 )}
                             </div>
@@ -418,13 +440,13 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                 {m['Psychological State'] && (
                                     <div className="flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400 italic">
                                         <BrainCircuit size={14} className="mt-0.5 shrink-0" />
-                                        <span>{m['Psychological State']}</span>
+                                        <span>{safeStr(m['Psychological State'])}</span>
                                     </div>
                                 )}
                                 {m['Non-specific Actions'] && (
                                     <div className="flex items-start gap-2 text-xs text-emerald-600 dark:text-emerald-400 border-t border-slate-100 dark:border-slate-800 pt-2 mt-2">
                                         <MapPin size={14} className="mt-0.5 shrink-0" />
-                                        <span>{m['Non-specific Actions']}</span>
+                                        <span>{safeStr(m['Non-specific Actions'])}</span>
                                     </div>
                                 )}
                             </div>
@@ -521,6 +543,43 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                })
              )}
           </div>
+          
+          {/* Grounding / Search Sources Collapsible Section */}
+          {hasGrounding && showSources && (
+             <div className="w-full max-w-full mt-2 bg-emerald-50 dark:bg-[#0d211c] border border-emerald-100 dark:border-emerald-900 rounded-xl overflow-hidden animate-slide-up">
+                 <div className="px-3 py-2 bg-emerald-100/50 dark:bg-emerald-900/30 border-b border-emerald-100 dark:border-emerald-900 flex justify-between items-center">
+                     <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1">
+                         <Globe size={10} /> 引用来源 (Sources)
+                     </span>
+                     <button onClick={() => setShowSources(false)} className="text-emerald-600 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-200"><ChevronUp size={12}/></button>
+                 </div>
+                 <div className="p-2 space-y-1 max-h-40 overflow-y-auto">
+                     {message.groundingMetadata.groundingChunks.map((chunk: any, i: number) => {
+                         if (chunk.web?.uri) {
+                             return (
+                                 <a 
+                                   key={i} 
+                                   href={chunk.web.uri} 
+                                   target="_blank" 
+                                   rel="noopener noreferrer"
+                                   className="flex items-center gap-2 p-2 rounded-lg hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors group/link"
+                                 >
+                                     <div className="w-5 h-5 bg-white dark:bg-black rounded-full flex items-center justify-center text-emerald-500 shadow-sm shrink-0 text-[10px] font-bold border border-emerald-100 dark:border-emerald-800">
+                                         {i + 1}
+                                     </div>
+                                     <div className="flex-1 min-w-0">
+                                         <div className="text-xs font-medium text-emerald-900 dark:text-emerald-100 truncate">{chunk.web.title || "未知网页"}</div>
+                                         <div className="text-[10px] text-emerald-600 dark:text-emerald-400 truncate opacity-70">{chunk.web.uri}</div>
+                                     </div>
+                                     <ExternalLink size={12} className="text-emerald-400 opacity-0 group-hover/link:opacity-100 transition-opacity" />
+                                 </a>
+                             )
+                         }
+                         return null;
+                     })}
+                 </div>
+             </div>
+          )}
         </div>
       </div>
     </div>

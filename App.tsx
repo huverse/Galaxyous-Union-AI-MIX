@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2, BarChart2, Wand2, RefreshCw, Hammer, Loader2, FileText } from 'lucide-react';
+import { Send, Settings, Users, Trash2, Menu, ImagePlus, BrainCircuit, X, Gavel, BookOpen, AlertTriangle, Share2, Download, Copy, Check, Plus, MessageSquare, MoreHorizontal, FileJson, Square, Handshake, Lock, Upload, User, Zap, Cpu, Sparkles, Coffee, Vote, Edit2, BarChart2, Wand2, RefreshCw, Hammer, Loader2, FileText, Book, ChevronDown, ChevronUp } from 'lucide-react';
 import { DEFAULT_PARTICIPANTS, USER_ID } from './constants';
 import { Message, Participant, ParticipantConfig, GameMode, Session, ProviderType, TokenUsage, RefereeContext, VoteState } from './types';
 import ChatMessage from './components/ChatMessage';
@@ -8,7 +8,7 @@ import SettingsModal from './components/SettingsModal';
 import CollaborationModal from './components/CollaborationModal';
 import MultimodalCenter from './components/MultimodalCenter';
 import VotingPanel from './components/VotingPanel';
-import { generateResponse, generateSessionTitle, detectRefereeIntent } from './services/aiService';
+import { generateResponse, generateSessionTitle, detectRefereeIntent, summarizeHistory } from './services/aiService';
 
 // Declare html2canvas globally
 declare const html2canvas: any;
@@ -81,7 +81,11 @@ const createNewSession = (): Session => ({
   isSocialMode: false,
   refereeContext: { mode: 'GENERAL', status: 'IDLE' },
   votingState: { isActive: false, title: '', candidates: [], votes: {} },
-  tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+  tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  // Compression Defaults
+  contextConfig: { enableCompression: false, maxHistoryMessages: 30 },
+  summary: '',
+  lastSummarizedMessageId: null
 });
 
 // Dynamic Gemini Star Icon (New Style)
@@ -168,7 +172,10 @@ const App: React.FC = () => {
                 isAutoLoop: s.isAutoLoop ?? false,
                 refereeContext: s.refereeContext ?? { mode: 'GENERAL', status: 'IDLE' },
                 votingState: s.votingState ?? { isActive: false, title: '', candidates: [], votes: {} },
-                tokenUsage: s.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+                tokenUsage: s.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+                contextConfig: s.contextConfig ?? { enableCompression: false, maxHistoryMessages: 30 },
+                summary: s.summary ?? '',
+                lastSummarizedMessageId: s.lastSummarizedMessageId ?? null
             }));
         }
       }
@@ -225,12 +232,16 @@ const App: React.FC = () => {
   // Import State
   const [pendingImportFile, setPendingImportFile] = useState<File | null>(null);
   const [importPassword, setImportPassword] = useState('');
+  
+  // Summary Expansion
+  const [isSummaryExpanded, setIsSummaryExpanded] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const configFileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = () => {
     if (!selectionMode) {
@@ -253,6 +264,20 @@ const App: React.FC = () => {
       }
     }
   }, [inputText]);
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+        Array.from(e.target.files).forEach(file => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const base64 = (reader.result as string).split(',')[1];
+                setInputImages(prev => [...prev, base64]);
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+    if (imageInputRef.current) imageInputRef.current.value = '';
+  };
 
   // --- GLOBAL AUTO LOOP LOGIC (INDEPENDENT) ---
   useEffect(() => {
@@ -299,6 +324,63 @@ const App: React.FC = () => {
   // Helper to update CURRENT session (UI interaction only)
   const updateActiveSession = (updates: Partial<Session>) => {
     updateSessionById(activeSessionId, updates);
+  };
+  
+  // BACKGROUND SUMMARIZATION
+  const triggerBackgroundCompression = async (targetSessionId: string, msgs: Message[]) => {
+      const s = sessionsRef.current.find(session => session.id === targetSessionId);
+      if (!s || !s.contextConfig.enableCompression) return;
+      
+      const threshold = s.contextConfig.maxHistoryMessages + 10;
+      if (msgs.length <= threshold) return;
+      
+      // Check if we already summarized recently to avoid thrashing
+      // Simple logic: if last msg id is same, don't summarize.
+      // But here we check length.
+      
+      // Find the range to summarize:
+      // From: lastSummarizedMessageId (exclusive) or beginning
+      // To: Total Length - Sliding Window
+      
+      let startIndex = 0;
+      if (s.lastSummarizedMessageId) {
+          const lastIdx = msgs.findIndex(m => m.id === s.lastSummarizedMessageId);
+          if (lastIdx !== -1) startIndex = lastIdx + 1;
+      }
+      
+      const endIndex = msgs.length - s.contextConfig.maxHistoryMessages;
+      
+      if (endIndex <= startIndex) return; // Nothing new to compress
+      
+      const msgsToCompress = msgs.slice(startIndex, endIndex);
+      if (msgsToCompress.length === 0) return;
+
+      console.log(`Starting background compression for ${msgsToCompress.length} messages...`);
+      
+      // Use a distinct API key (Gemini preferably)
+      const geminiP = participantsRef.current.find(p => p.provider === ProviderType.GEMINI && p.config.apiKey);
+      if (!geminiP) return; // Need a key
+      
+      try {
+          const newSummary = await summarizeHistory(
+              s.summary, 
+              msgsToCompress, 
+              participantsRef.current, 
+              geminiP.config.apiKey,
+              geminiP.config.baseUrl
+          );
+          
+          const lastMsgId = msgsToCompress[msgsToCompress.length - 1].id;
+          
+          updateSessionById(targetSessionId, {
+              summary: newSummary,
+              lastSummarizedMessageId: lastMsgId
+          });
+          console.log("Compression Complete.");
+          
+      } catch(e) {
+          console.error("Background Compression Error", e);
+      }
   };
 
   const handleRenameSession = () => {
@@ -491,7 +573,8 @@ const App: React.FC = () => {
            isAutoPlayStopped: false,
            tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
            refereeContext: { mode: 'GENERAL', status: 'IDLE' },
-           votingState: { isActive: false, title: '', candidates: [], votes: {} }
+           votingState: { isActive: false, title: '', candidates: [], votes: {} },
+           summary: '', lastSummarizedMessageId: null
         });
        exitSelectionMode();
     }
@@ -603,6 +686,9 @@ const App: React.FC = () => {
   const processPartyRound = async (targetSessionId: string, history: Message[], specificParticipantIds?: string[], forceTriggerJudge: boolean = false) => {
     updateSessionById(targetSessionId, { isProcessing: true });
     
+    // Trigger Compression Check
+    triggerBackgroundCompression(targetSessionId, history);
+
     const controller = new AbortController();
     sessionControllersRef.current.set(targetSessionId, controller);
     const signal = controller.signal;
@@ -658,7 +744,8 @@ const App: React.FC = () => {
               signal,
               null,
               false, false, false, // Judge overrides other modes
-              initialSession.refereeContext // Pass LATEST context
+              initialSession.refereeContext,
+              initialSession.contextConfig, initialSession.summary // Pass Memory
           );
 
           if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -693,6 +780,11 @@ const App: React.FC = () => {
 
           // Add messages and update tokens atomically
           const addedMsgs = appendMessages(parsedRef.messages);
+          // Attach metadata to the first message if present and messages were added
+          if (addedMsgs.length > 0 && refereeRes.groundingMetadata) {
+             addedMsgs[0].groundingMetadata = refereeRes.groundingMetadata;
+          }
+
           if (addedMsgs.length > 0 || parsedRef.voteStart) {
               setSessions(prev => prev.map(s => {
                   if (s.id !== targetSessionId) return s;
@@ -755,12 +847,19 @@ const App: React.FC = () => {
                   signal,
                   initialSession.specialRoleId,
                   false, false, false,
-                  initialSession.refereeContext
+                  initialSession.refereeContext,
+                  initialSession.contextConfig, initialSession.summary // Pass Memory
               );
 
               if (signal.aborted) break;
               if (playerRes.usage) {
                   accumulateTokenUsage(player.id, playerRes.usage);
+              }
+
+              // FILTER: If content is empty and no images, skip
+              if (!playerRes.content.trim() && (!playerRes.generatedImages || playerRes.generatedImages.length === 0)) {
+                  console.warn(`Empty response from ${player.name}, skipping to prevent ghost message.`);
+                  continue;
               }
 
               // Detect Voting Action in Player Content
@@ -798,7 +897,9 @@ const App: React.FC = () => {
                   senderId: player.id,
                   content: finalContent,
                   recipientId: recipientId,
-                  timestamp: Date.now()
+                  timestamp: Date.now(),
+                  images: playerRes.generatedImages, // Add generated images here
+                  groundingMetadata: playerRes.groundingMetadata
               };
 
               currentRoundHistory.push(pMsg);
@@ -828,7 +929,8 @@ const App: React.FC = () => {
                     signal,
                     null,
                     false, false, false,
-                    initialSession.refereeContext
+                    initialSession.refereeContext,
+                    initialSession.contextConfig, initialSession.summary // Pass Memory
                );
 
                if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -839,6 +941,12 @@ const App: React.FC = () => {
                const parsedResolve = parseRefereeResponse(specialRoleParticipant.id, refResolveRes.content);
                
                const addedResolveMsgs = appendMessages(parsedResolve.messages);
+               
+               // Attach metadata to first message if present
+               if (addedResolveMsgs.length > 0 && refResolveRes.groundingMetadata) {
+                  addedResolveMsgs[0].groundingMetadata = refResolveRes.groundingMetadata;
+               }
+
                if (addedResolveMsgs.length > 0) {
                     setSessions(prev => prev.map(s => {
                         if (s.id !== targetSessionId) return s;
@@ -903,7 +1011,8 @@ const App: React.FC = () => {
                 initialSession.isHumanMode,
                 initialSession.isLogicMode,
                 initialSession.isSocialMode,
-                initialSession.refereeContext
+                initialSession.refereeContext,
+                initialSession.contextConfig, initialSession.summary // Pass Memory
             );
             
             if (signal.aborted) break;
@@ -911,11 +1020,19 @@ const App: React.FC = () => {
                 accumulateTokenUsage(p.id, response.usage);
             }
 
+            // FILTER: If content is empty and no images, skip
+            if (!response.content.trim() && (!response.generatedImages || response.generatedImages.length === 0)) {
+                console.warn(`Empty response from ${p.name}, skipping to prevent ghost message.`);
+                continue;
+            }
+
             const newMessage: Message = {
                 id: Date.now().toString() + Math.random(),
                 senderId: p.id,
                 content: response.content,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                images: response.generatedImages, // Add generated images
+                groundingMetadata: response.groundingMetadata
             };
 
             currentRoundHistory.push(newMessage);
@@ -1243,6 +1360,8 @@ const App: React.FC = () => {
   return (
     <div className="flex h-[100dvh] bg-[#f5f5f7] dark:bg-black font-sans text-slate-900 dark:text-slate-100 overflow-hidden relative selection:bg-blue-200 dark:selection:bg-blue-900">
       <input type="file" ref={configFileInputRef} className="hidden" onChange={handleFileChange} />
+      {/* Hidden input for image uploads from chat bar */}
+      <input type="file" ref={imageInputRef} className="hidden" multiple accept="image/*" onChange={handleImageUpload} />
 
       {/* --- Sidebar --- */}
       <div className={`
@@ -1301,11 +1420,19 @@ const App: React.FC = () => {
                 
                 <div className="flex flex-col items-end justify-center ml-2 pl-2 border-l border-slate-200 dark:border-white/10 text-[9px] font-mono leading-tight shrink-0 text-slate-400">
                     <span className="font-bold text-slate-500 dark:text-slate-300">{tokens.totalTokens.toLocaleString()}</span>
-                    <div className="flex gap-1 opacity-75">
-                        <span className="text-purple-500">{tokens.completionTokens.toLocaleString()}</span>
-                        <span>|</span>
-                        <span className="text-blue-500">{tokens.promptTokens.toLocaleString()}</span>
-                    </div>
+                    
+                    {/* Add Compressed Indicator if active */}
+                    {s.contextConfig.enableCompression && (
+                         <span className="text-indigo-500 scale-75 origin-right">Comp.</span>
+                    )}
+
+                    {!s.contextConfig.enableCompression && (
+                        <div className="flex gap-1 opacity-75">
+                            <span className="text-purple-500">{tokens.completionTokens.toLocaleString()}</span>
+                            <span>|</span>
+                            <span className="text-blue-500">{tokens.promptTokens.toLocaleString()}</span>
+                        </div>
+                    )}
                 </div>
 
                 {s.isProcessing && (
@@ -1367,12 +1494,14 @@ const App: React.FC = () => {
                 <span className="text-[10px] text-slate-500 dark:text-slate-400">
                    {activeSession.gameMode === GameMode.FREE_CHAT ? '自由模式' : '裁判模式'}
                    {' · '}{activeCount} 成员在线
-                   {activeSession.refereeContext?.mode !== 'GENERAL' && ` · ${activeSession.refereeContext?.mode}`}
+                   {activeSession.contextConfig.enableCompression && (
+                       <span className="text-indigo-500 ml-1 font-bold"> · 记忆压缩已开启</span>
+                   )}
                 </span>
              </div>
           </div>
+          {/* ... Header Buttons ... */}
           <div className="flex gap-2">
-             {/* Independent Auto Loop Toggle */}
              <button 
                 title={activeSession.isAutoLoop ? "停止自动循环 (Auto Loop ON)" : "开启自动循环 (Auto Loop OFF)"}
                 onClick={() => updateActiveSession({ isAutoLoop: !activeSession.isAutoLoop, isAutoPlayStopped: false })}
@@ -1446,311 +1575,186 @@ const App: React.FC = () => {
 
         {/* Chat List */}
         <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 scroll-smooth relative" ref={chatContainerRef}>
-          {activeSession.messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-center p-8">
-              <div className="relative group animate-pulse-slow">
-                <div className="absolute inset-0 bg-gradient-to-r from-blue-400 to-purple-400 rounded-full blur-3xl opacity-20 group-hover:opacity-30 transition-opacity"></div>
-                <div className="relative w-24 h-24 bg-white dark:bg-white/5 rounded-3xl shadow-xl flex items-center justify-center mb-6 border border-slate-100 dark:border-white/10">
-                  <MessageSquare size={48} className="text-slate-300 dark:text-slate-600" />
-                </div>
-              </div>
-              <p className="text-slate-500 dark:text-slate-400 leading-relaxed mb-6 max-w-xs mx-auto text-sm">
-                当前聚会暂无消息。<br/>邀请 AI 开始狼人杀、辩论或闲聊。
-              </p>
-              <button 
-                onClick={() => setIsSettingsOpen(true)}
-                className="px-6 py-2 bg-slate-900 dark:bg-slate-700 text-white rounded-full font-bold shadow-lg text-sm"
-              >
-                设置成员
-              </button>
-            </div>
-          ) : (
-            <>
-              {activeSession.messages.map(msg => {
-                const sender = participants.find(p => p.id === msg.senderId);
-                const isSpecial = sender?.id === activeSession.specialRoleId && activeSession.gameMode !== GameMode.FREE_CHAT;
-                
-                return (
-                  <ChatMessage 
-                    key={msg.id} 
-                    message={msg} 
-                    sender={msg.senderId === 'SYSTEM' ? undefined : sender}
-                    allParticipants={participants}
-                    isSpecialRole={isSpecial}
-                    specialRoleType={isSpecial ? (activeSession.gameMode === GameMode.JUDGE_MODE ? 'JUDGE' : 'NARRATOR') : undefined}
-                    selectionMode={selectionMode}
-                    isSelected={selectedMsgIds.has(msg.id)}
-                    onSelect={toggleSelection}
-                    onLongPress={handleLongPress}
-                    isSocialMode={activeSession.isSocialMode}
-                  />
-                )
-              })}
-              
-              {activeSession.isProcessing && activeSession.currentTurnParticipantId && (
-                <div className="flex w-full mb-8 justify-start animate-fade-in">
-                  <div className="flex flex-col gap-2 max-w-[80%]">
-                     <div className="flex items-center gap-2 ml-1">
-                        <span className="text-xs font-bold text-blue-500">
-                           {participants.find(p => p.id === activeSession.currentTurnParticipantId)?.nickname || participants.find(p => p.id === activeSession.currentTurnParticipantId)?.name}
-                        </span>
-                        <span className="text-[10px] text-slate-400 uppercase tracking-wide">
-                          Thinking...
-                        </span>
-                     </div>
-                     <div className="bg-white dark:bg-white/10 border border-blue-100 dark:border-transparent p-3 rounded-2xl rounded-tl-sm shadow-sm flex items-center gap-3">
-                        <div className="relative w-6 h-6 flex items-center justify-center">
-                           <div className="absolute inset-0 border-2 border-slate-100 dark:border-slate-600 rounded-full"></div>
-                           <div className="absolute inset-0 border-2 border-blue-500 rounded-full border-t-transparent animate-spin"></div>
-                        </div>
-                        <div className="h-1.5 w-16 bg-slate-100 dark:bg-slate-600 rounded animate-pulse"></div>
-                     </div>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-          <div ref={messagesEndRef} className="h-2" />
-        </div>
-
-        {/* Voting Panel */}
-        {activeSession.votingState?.isActive && (
-            <VotingPanel 
-                voteState={activeSession.votingState}
-                participants={participants}
-                onVote={handleUserVote}
-                onEndVote={handleEndVote}
-                userVotedId={activeSession.votingState.votes[USER_ID]}
-                isJudgeMode={isJudgeModeActive}
-            />
-        )}
-
-        {/* Input / Selection Area */}
-        {selectionMode ? (
-          <div className="p-4 bg-white dark:bg-[#1c1c1e] border-t border-slate-200 dark:border-black/50 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] z-30 animate-slide-up">
-             {/* ... existing selection UI ... */}
-             <div className="max-w-3xl mx-auto flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <button onClick={exitSelectionMode} className="p-2 bg-slate-100 hover:bg-slate-200 dark:bg-white/10 rounded-full transition-colors">
-                    <X size={18} />
-                  </button>
-                  <span className="font-bold text-sm text-slate-700 dark:text-slate-200">
-                     {selectedMsgIds.size} 已选
-                  </span>
-                </div>
-                <div className="flex gap-2 overflow-x-auto pb-1">
-                   {/* DELETE BUTTON */}
-                   <button 
-                     onClick={handleDeleteSelected}
-                     disabled={selectedMsgIds.size === 0}
-                     className="whitespace-nowrap px-4 py-2 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-colors"
-                   >
-                      <Trash2 size={14} /> 删除
-                   </button>
-                   
-                   <div className="w-px h-8 bg-slate-200 dark:bg-white/10 mx-2"></div>
-                   
-                   <button 
-                     onClick={generateShareImage}
-                     disabled={selectedMsgIds.size === 0 || isGeneratingShare}
-                     className="whitespace-nowrap px-3 py-2 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 rounded-lg font-medium text-xs flex items-center gap-1.5 hover:bg-slate-200 dark:hover:bg-white/20 transition-colors"
-                   >
-                      {isGeneratingShare ? <Loader2 size={14} className="animate-spin"/> : <ImagePlus size={14} />} 
-                      图片
-                   </button>
-                   <button 
-                     onClick={generateShareFile}
-                     disabled={selectedMsgIds.size === 0}
-                     className="whitespace-nowrap px-3 py-2 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-slate-200 rounded-lg font-medium text-xs flex items-center gap-1.5 hover:bg-slate-200 dark:hover:bg-white/20 transition-colors"
-                   >
-                      <FileText size={14} /> 文本
-                   </button>
-                   {/* ... */}
-                </div>
-             </div>
-          </div>
-        ) : (
-          <div className="p-4 bg-gradient-to-t from-white via-white to-transparent dark:from-black dark:via-black dark:to-transparent z-10 pb-6">
-            <div className="max-w-3xl mx-auto relative">
-              {inputImages.length > 0 && (
-                <div className="absolute bottom-full left-0 mb-4 flex gap-3 overflow-x-auto w-full p-2">
-                  {inputImages.map((img, idx) => (
-                    <div key={idx} className="relative group shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 shadow-md">
-                        <img src={`data:image/png;base64,${img}`} className="w-full h-full object-cover" />
-                        <button onClick={() => setInputImages(prev => prev.filter((_, i) => i !== idx))} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-0.5">
-                          <X size={10} />
-                        </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="relative flex items-end gap-3 bg-white dark:bg-[#1c1c1e] p-2.5 rounded-[1.5rem] shadow-xl border border-slate-200 dark:border-white/10 transition-all focus-within:ring-2 focus-within:ring-blue-500/20">
-                  <div className="flex items-center gap-1 pb-1">
-                      <button 
-                        onClick={() => fileInputRef.current?.click()}
-                        className="p-3 text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-full transition-all active:scale-90 shrink-0 touch-manipulation"
-                        disabled={activeSession.isProcessing}
-                        title="上传图片"
-                      >
-                        <ImagePlus size={22} />
-                      </button>
-                      
-                      <button
-                        onClick={() => setIsCollaborationOpen(true)}
-                        className="p-3 text-slate-400 hover:text-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded-full transition-all active:scale-90 shrink-0 touch-manipulation"
-                        disabled={activeSession.isProcessing || activeCount < 2}
-                        title="AI 协同创作"
-                      >
-                         <Handshake size={22} />
-                      </button>
-
-                      {isJudgeModeActive && (
-                        <button
-                          onClick={handleManualRefereeCall}
-                          className="p-3 text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-full transition-all active:scale-90 shrink-0 touch-manipulation"
-                          title="呼叫裁判 / 手动触发"
-                        >
-                            <Hammer size={22} />
-                        </button>
-                      )}
-                      
-                      {activeSession.isSocialMode && (
-                        <button
-                            onClick={handleVote}
-                            className="p-3 text-slate-400 hover:text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/20 rounded-full transition-all active:scale-90 shrink-0 touch-manipulation"
-                            disabled={activeSession.isProcessing || activeCount === 0}
-                            title="发起 AI 投票"
-                        >
-                            <Vote size={22} />
-                        </button>
-                      )}
-
-                      {/* Multimodal Trigger */}
-                      <button
-                        onClick={() => setIsMultimodalOpen(true)}
-                        className="p-3 rounded-full shrink-0 touch-manipulation relative overflow-hidden group active:scale-95"
-                        title="多模态创作模式"
-                      >
-                         <div className="absolute inset-0 bg-gradient-to-tr from-pink-500 via-purple-500 to-indigo-500 opacity-80 group-hover:opacity-100 transition-opacity"></div>
-                         <Wand2 size={22} className="relative z-10 text-white" />
-                      </button>
-                  </div>
-
-                  <input type="file" ref={fileInputRef} className="hidden" accept="image/*" multiple onChange={(e) => {
-                      const files = e.target.files;
-                      if (files) Array.from(files).forEach((f) => {
-                          const r = new FileReader();
-                          r.onloadend = () => setInputImages(prev => [...prev, (r.result as string).split(',')[1]]);
-                          r.readAsDataURL(f as Blob);
-                      });
-                      if(fileInputRef.current) fileInputRef.current.value = '';
-                  }} />
-                  
-                  <textarea
-                    ref={textareaRef}
-                    className="flex-1 max-h-[150px] w-full bg-transparent border-0 focus:ring-0 resize-none py-3.5 px-2 text-base placeholder:text-slate-400 text-slate-800 dark:text-slate-200 leading-relaxed"
-                    placeholder={activeSession.isProcessing ? "AI 正在思考中..." : activeCount === 0 ? "请先配置 AI 成员..." : isJudgeModeActive ? "输入指令或开启游戏..." : "输入消息..."}
-                    rows={1}
-                    value={inputText}
-                    onChange={e => setInputText(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                    disabled={activeCount === 0}
-                  />
-                  
+          
+          {/* COMPRESSION SUMMARY CARD (NEW) */}
+          {activeSession.contextConfig.enableCompression && activeSession.summary && (
+              <div className="w-full max-w-4xl mx-auto mb-8 animate-fade-in">
                   <button 
-                    onClick={handleSend}
-                    disabled={(!inputText.trim() && inputImages.length === 0 && !activeSession.isProcessing) || activeCount === 0}
-                    className={`mb-1 p-3 rounded-full flex items-center justify-center transition-all duration-300 shrink-0 touch-manipulation
-                      ${activeSession.isProcessing
-                        ? 'bg-red-500 text-white hover:bg-red-600 shadow-lg animate-pulse'
-                        : (!inputText.trim() && inputImages.length === 0) || activeCount === 0
-                            ? 'bg-slate-100 text-slate-300 dark:bg-white/10 dark:text-slate-500' 
-                            : 'bg-[#4285f4] text-white hover:bg-blue-600 shadow-lg hover:scale-105 active:scale-95'
-                      }`}
+                    onClick={() => setIsSummaryExpanded(!isSummaryExpanded)}
+                    className="w-full flex items-center justify-between p-4 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-2xl hover:bg-indigo-100 dark:hover:bg-indigo-900/30 transition-all group"
                   >
-                    {activeSession.isProcessing ? <Square size={20} fill="currentColor" /> : <Send size={20} />}
+                    <div className="flex items-center gap-3">
+                        <div className="p-2 bg-indigo-100 dark:bg-indigo-800 rounded-lg text-indigo-600 dark:text-indigo-300">
+                             <Book size={18} />
+                        </div>
+                        <div className="text-left">
+                            <div className="font-bold text-sm text-indigo-900 dark:text-indigo-100">长期记忆摘要 (Long-term Memory)</div>
+                            <div className="text-[10px] text-indigo-600/70 dark:text-indigo-300/70">
+                                已自动压缩早期对话，保留核心剧情
+                            </div>
+                        </div>
+                    </div>
+                    {isSummaryExpanded ? <ChevronUp size={18} className="text-indigo-400"/> : <ChevronDown size={18} className="text-indigo-400"/>}
                   </button>
+                  
+                  {isSummaryExpanded && (
+                      <div className="p-4 bg-white/50 dark:bg-black/20 border-x border-b border-indigo-200 dark:border-indigo-800 rounded-b-2xl text-xs md:text-sm text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-wrap animate-slide-up">
+                          {activeSession.summary}
+                      </div>
+                  )}
               </div>
-            </div>
-          </div>
-        )}
-      </div>
-      
-      {/* ... Existing Modals ... */}
-      
-      {/* INTERVENTION MODAL */}
-      {showInterventionModal && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-             <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up border border-amber-500/20">
-                 <div className="flex flex-col items-center text-center mb-6">
-                     <div className="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-amber-600 mb-4 animate-bounce">
-                         <Gavel size={32} />
-                     </div>
-                     <h3 className="text-xl font-bold text-slate-900 dark:text-white">裁判介入请求</h3>
-                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">
-                         裁判 AI 检测到需要独立介入的情况。
-                     </p>
-                     <div className="mt-4 w-full bg-amber-50 dark:bg-amber-900/10 border border-amber-100 dark:border-amber-900/30 rounded-xl p-3">
-                         <p className="text-xs font-mono text-amber-700 dark:text-amber-400 text-left">
-                             <strong>REASON:</strong> {showInterventionModal.reason}
-                         </p>
-                     </div>
-                 </div>
-                 <div className="flex gap-3">
-                     <button onClick={() => setShowInterventionModal(null)} className="flex-1 py-3 rounded-xl bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300 font-bold text-sm">忽略</button>
-                     <button onClick={handleInterventionConfirm} className="flex-1 py-3 rounded-xl bg-amber-600 text-white font-bold text-sm">允许介入</button>
-                 </div>
-             </div>
-          </div>
-      )}
+          )}
 
-      {/* KICK REQUEST MODAL */}
-      {activeSession.pendingKickRequest && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-sm sm:max-w-md rounded-2xl p-6 shadow-2xl animate-slide-up border border-slate-100 dark:border-white/10">
-            <div className="flex flex-col items-center text-center mb-6">
-              <div className="w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-600 mb-4">
-                <AlertTriangle size={32} />
-              </div>
-              <h3 className="text-xl font-bold text-slate-900 dark:text-white">裁判裁决: 淘汰玩家</h3>
-              <p className="text-sm text-slate-500 dark:text-slate-400 mt-2 leading-relaxed">
-                裁判请求将 <strong className="text-slate-900 dark:text-white px-1">{participants.find(p => p.id === activeSession.pendingKickRequest?.targetId)?.nickname || '未知'}</strong> 
-                <span className="text-xs opacity-75">此操作将直接禁用该 AI 配置并将其下线。</span>
-              </p>
-              <div className="mt-4 w-full bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 rounded-xl p-3">
-                <p className="text-xs font-mono text-red-600 dark:text-red-400 text-left">
-                  <strong>REASON:</strong> {activeSession.pendingKickRequest.reason}
-                </p>
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <button
-                onClick={() => updateActiveSession({ pendingKickRequest: null })}
-                className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-white/10 dark:hover:bg-white/20 text-slate-600 dark:text-slate-300 font-bold text-sm transition-colors"
-              >
-                驳回
-              </button>
-              <button
-                onClick={() => activeSession.pendingKickRequest && executeKick(activeSession.pendingKickRequest.targetId)}
-                className="flex-1 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-lg shadow-red-500/30 transition-colors"
-              >
-                确认并禁用
-              </button>
-            </div>
-          </div>
+          {activeSession.messages.map((msg, idx) => {
+             const sender = participants.find(p => p.id === msg.senderId);
+             
+             return (
+               <ChatMessage 
+                  key={msg.id} 
+                  message={msg} 
+                  sender={sender}
+                  allParticipants={participants}
+                  isSpecialRole={msg.senderId === activeSession.specialRoleId}
+                  specialRoleType={activeSession.gameMode === GameMode.JUDGE_MODE ? 'JUDGE' : 'NARRATOR'}
+                  selectionMode={selectionMode}
+                  isSelected={selectedMsgIds.has(msg.id)}
+                  onSelect={() => toggleSelection(msg.id)}
+                  onLongPress={handleLongPress}
+                  isSocialMode={activeSession.isSocialMode}
+               />
+             );
+          })}
+          
+          <div ref={messagesEndRef} className="h-4" />
         </div>
-      )}
-      
-      {/* Collaboration Modal */}
-      <CollaborationModal
-        isOpen={isCollaborationOpen}
-        onClose={() => setIsCollaborationOpen(false)}
-        participants={participants}
-        onStartCollaboration={handleStartCollaboration}
-      />
-      
-      {/* Settings Modal */}
+
+        {/* Voting Panel Overlay */}
+        <VotingPanel 
+            voteState={activeSession.votingState || { isActive: false, title: '', candidates: [], votes: {} }}
+            participants={participants}
+            onVote={handleUserVote}
+            onEndVote={handleEndVote}
+            userVotedId={activeSession.votingState?.votes?.[USER_ID]}
+            isJudgeMode={activeSession.gameMode === GameMode.JUDGE_MODE}
+        />
+
+        {/* Input Area */}
+        <div className="p-4 md:p-6 bg-white dark:bg-black border-t border-slate-200 dark:border-white/10 relative z-30 shrink-0">
+           {/* Image Previews in Input */}
+           {inputImages.length > 0 && (
+              <div className="flex gap-2 mb-3 overflow-x-auto pb-2">
+                 {inputImages.map((img, idx) => (
+                    <div key={idx} className="relative w-20 h-20 shrink-0 group">
+                       <img src={`data:image/png;base64,${img}`} className="w-full h-full object-cover rounded-lg border border-slate-200 dark:border-slate-700" />
+                       <button 
+                         onClick={() => setInputImages(prev => prev.filter((_, i) => i !== idx))}
+                         className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5 shadow-md"
+                       >
+                         <X size={12} />
+                       </button>
+                    </div>
+                 ))}
+              </div>
+           )}
+
+           <div className="flex items-end gap-3 max-w-4xl mx-auto">
+             <button 
+                onClick={() => setIsMultimodalOpen(true)}
+                className="p-3 text-slate-400 hover:text-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded-2xl transition-all active:scale-95 shrink-0"
+                title="多模态创作中心"
+             >
+                <Sparkles size={24} />
+             </button>
+             
+             {/* RESTORED: Image Upload Button */}
+             <button 
+                onClick={() => imageInputRef.current?.click()}
+                className="p-3 text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-2xl transition-all active:scale-95 shrink-0"
+                title="上传图片"
+             >
+                <ImagePlus size={24} />
+             </button>
+
+             {isJudgeModeActive && (
+                 <button 
+                    onClick={handleManualRefereeCall}
+                    className="p-3 text-slate-400 hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-2xl transition-all active:scale-95 shrink-0"
+                    title="呼叫裁判"
+                 >
+                    <Hammer size={24} />
+                 </button>
+             )}
+
+             <div className="flex-1 bg-slate-100 dark:bg-[#1c1c1e] rounded-[1.5rem] flex items-center px-4 py-2 border border-transparent focus-within:border-blue-500/50 focus-within:bg-white dark:focus-within:bg-black transition-all shadow-inner">
+                <textarea
+                  ref={textareaRef}
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  placeholder={
+                      activeSession.isProcessing ? "AI 正在思考中..." : 
+                      isJudgeModeActive ? "输入行动，或 @裁判 寻求介入..." :
+                      "输入消息..."
+                  }
+                  disabled={activeSession.isProcessing}
+                  rows={1}
+                  className="w-full bg-transparent border-none outline-none text-slate-800 dark:text-slate-100 placeholder:text-slate-400 resize-none max-h-[150px] py-2 leading-relaxed"
+                />
+             </div>
+
+             <button 
+               onClick={handleSend}
+               disabled={(!inputText.trim() && inputImages.length === 0) || activeSession.isProcessing}
+               className={`
+                 p-3 rounded-2xl transition-all shadow-lg active:scale-95 shrink-0 flex items-center justify-center
+                 ${(!inputText.trim() && inputImages.length === 0) || activeSession.isProcessing
+                   ? 'bg-slate-200 dark:bg-white/10 text-slate-400 cursor-not-allowed' 
+                   : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/30'
+                 }
+               `}
+             >
+               {activeSession.isProcessing ? (
+                 <Loader2 size={24} className="animate-spin" />
+               ) : (
+                 <Send size={24} className={(!inputText.trim() && inputImages.length === 0) ? 'ml-0' : 'ml-0.5'} />
+               )}
+             </button>
+           </div>
+           
+           {/* REMOVED: Footer Text Div */}
+        </div>
+
+        {/* Selection Bar */}
+        {selectionMode && (
+           <div className="absolute top-0 left-0 right-0 h-16 bg-white dark:bg-[#1c1c1e] border-b border-blue-500/30 flex items-center justify-between px-6 z-40 animate-slide-down shadow-xl">
+               <div className="flex items-center gap-4">
+                  <button onClick={exitSelectionMode} className="p-2 hover:bg-slate-100 dark:hover:bg-white/10 rounded-full">
+                     <X size={20} />
+                  </button>
+                  <span className="font-bold text-lg">{selectedMsgIds.size} 已选择</span>
+               </div>
+               <div className="flex gap-2">
+                   <button onClick={generateShareImage} className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-sm">
+                      <ImagePlus size={16} /> 生成图片
+                   </button>
+                   <button onClick={generateShareFile} className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-white/10 hover:bg-slate-200 text-slate-700 dark:text-slate-200 rounded-xl font-bold text-sm">
+                      <FileText size={16} /> 导出文本
+                   </button>
+                   <button onClick={handleDeleteSelected} className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl">
+                      <Trash2 size={20} />
+                   </button>
+               </div>
+           </div>
+        )}
+
+      </div>
+
+      {/* --- Modals --- */}
       <SettingsModal 
         isOpen={isSettingsOpen} 
         onClose={() => setIsSettingsOpen(false)}
@@ -1766,102 +1770,89 @@ const App: React.FC = () => {
         onImportConfig={() => configFileInputRef.current?.click()}
         onResetTokenUsage={handleResetTokenUsage}
         onResetAllTokenUsage={handleResetAllTokenUsage}
+        contextConfig={activeSession.contextConfig}
+        onUpdateContextConfig={(cfg) => updateActiveSession({ contextConfig: cfg })}
       />
 
-      {/* NEW: Multimodal Center */}
+      <CollaborationModal
+        isOpen={isCollaborationOpen}
+        onClose={() => setIsCollaborationOpen(false)}
+        participants={participants}
+        onStartCollaboration={handleStartCollaboration}
+      />
+      
       <MultimodalCenter 
         isOpen={isMultimodalOpen}
         onClose={() => setIsMultimodalOpen(false)}
         participants={participants}
       />
 
-      {/* ... Share Modal & Import Modal preserved as is ... */}
+      {/* Intervention Modal */}
+      {showInterventionModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+              <div className="bg-white dark:bg-[#1e1e1e] w-full max-w-sm p-6 rounded-3xl shadow-2xl border-t-4 border-amber-500 animate-slide-up">
+                  <div className="flex flex-col items-center text-center mb-6">
+                      <div className="w-16 h-16 bg-amber-100 dark:bg-amber-900/30 rounded-full flex items-center justify-center text-amber-600 mb-4 animate-bounce">
+                          <AlertTriangle size={32} />
+                      </div>
+                      <h3 className="text-xl font-bold">裁判介入建议</h3>
+                      <p className="text-sm text-slate-500 mt-2">{showInterventionModal.reason}</p>
+                  </div>
+                  <div className="flex gap-3">
+                      <button onClick={() => setShowInterventionModal(null)} className="flex-1 py-3 rounded-xl bg-slate-100 dark:bg-white/10 font-bold text-sm text-slate-600 dark:text-slate-300">忽略</button>
+                      <button onClick={handleInterventionConfirm} className="flex-1 py-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-sm shadow-lg shadow-amber-500/30">
+                          执行介入
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
+
       {/* Share Modal */}
       {showShareModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in" onClick={() => setShowShareModal(false)}>
-           <div className="bg-white dark:bg-[#1e1e1e] w-full max-w-lg rounded-3xl p-6 shadow-2xl animate-slide-up relative" onClick={e => e.stopPropagation()}>
-              <button onClick={() => setShowShareModal(false)} className="absolute top-4 right-4 p-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500 hover:bg-slate-200 transition-colors">
-                <X size={20} />
-              </button>
-              
-              <h3 className="text-xl font-bold mb-6 text-slate-800 dark:text-white flex items-center gap-2">
-                 <Share2 size={24} className="text-blue-500"/> 分享对话
-              </h3>
-              
-              <div className="flex flex-col gap-4">
-                 {shareResultUrl ? (
-                    <div className="relative rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-black/30">
-                       <img src={shareResultUrl} className="w-full h-auto max-h-[60vh] object-contain" alt="Share Preview" />
-                    </div>
-                 ) : shareLinkUrl ? (
-                    <div className="p-8 bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-2xl text-center">
-                        <FileText size={48} className="mx-auto text-blue-500 mb-4" />
-                        <p className="text-slate-600 dark:text-slate-300 font-medium mb-2">文件已生成</p>
-                        <p className="text-xs text-slate-400">格式: {shareType}</p>
-                    </div>
-                 ) : (
-                    <div className="p-12 flex items-center justify-center">
-                       <Sparkles className="animate-spin text-blue-500" size={32} />
-                    </div>
-                 )}
-                 
-                 <div className="flex gap-3 mt-2">
-                    <a 
-                      href={shareResultUrl || shareLinkUrl || '#'} 
-                      download={shareResultUrl ? `galaxyous-share-${Date.now()}.png` : `galaxyous-export-${Date.now()}.${shareType === 'JSON' ? 'json' : 'txt'}`}
-                      className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-sm shadow-lg shadow-blue-500/30 flex items-center justify-center gap-2 transition-all active:scale-95"
-                      onClick={(e) => { if(!shareResultUrl && !shareLinkUrl) e.preventDefault(); }}
-                    >
-                      <Download size={18} /> 下载{shareResultUrl ? '图片' : '文件'}
-                    </a>
-                 </div>
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
+              <div className="bg-white dark:bg-[#1e1e1e] w-full max-w-lg rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+                  <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
+                      <h3 className="font-bold text-lg">分享内容</h3>
+                      <button onClick={exitSelectionMode} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full"><X size={20}/></button>
+                  </div>
+                  <div className="p-6 overflow-y-auto flex flex-col items-center">
+                      {isGeneratingShare ? (
+                          <div className="py-10 flex flex-col items-center gap-4">
+                              <Loader2 size={40} className="animate-spin text-blue-500" />
+                              <p className="text-sm font-bold text-slate-500">正在生成...</p>
+                          </div>
+                      ) : (
+                          <>
+                             {shareResultUrl && (
+                                 <img src={shareResultUrl} className="max-w-full rounded-lg shadow-lg mb-6 border border-slate-200 dark:border-slate-800" />
+                             )}
+                             {shareLinkUrl && shareType === 'TEXT' && (
+                                 <div className="w-full h-48 bg-slate-50 dark:bg-black/30 p-4 rounded-xl border border-slate-200 dark:border-slate-800 overflow-y-auto font-mono text-xs whitespace-pre-wrap text-slate-600 dark:text-slate-300 mb-6">
+                                     {/* Preview text content is in the blob, hard to show here easily without reading it back, but user knows what they selected. */}
+                                     (文本文件预览)
+                                 </div>
+                             )}
+                             
+                             <div className="flex gap-3 w-full">
+                                 {shareResultUrl && (
+                                     <a href={shareResultUrl} download={`galaxyous-share-${Date.now()}.png`} className="flex-1 flex items-center justify-center gap-2 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-colors">
+                                         <Download size={18} /> 保存图片
+                                     </a>
+                                 )}
+                                 {shareLinkUrl && (
+                                     <a href={shareLinkUrl} download={`galaxyous-chat-${Date.now()}.txt`} className="flex-1 flex items-center justify-center gap-2 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-colors">
+                                         <Download size={18} /> 下载文件
+                                     </a>
+                                 )}
+                             </div>
+                          </>
+                      )}
+                  </div>
               </div>
-           </div>
-        </div>
+          </div>
       )}
-      
-      {/* Import Password Modal */}
-      {pendingImportFile && (
-         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-             <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-sm rounded-2xl p-6 shadow-2xl animate-slide-up border border-slate-100 dark:border-white/10">
-                 <div className="flex flex-col items-center mb-5">
-                    <div className="w-12 h-12 rounded-full bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center text-purple-600 mb-3">
-                       <Lock size={24} />
-                    </div>
-                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">配置解密</h3>
-                    <p className="text-sm text-slate-500 dark:text-slate-400 text-center">
-                       请输入密码以导入配置文件<br/>
-                       <span className="font-mono text-xs opacity-70 break-all">{pendingImportFile.name}</span>
-                    </p>
-                 </div>
-                 
-                 <input 
-                   type="password" 
-                   value={importPassword}
-                   onChange={(e) => setImportPassword(e.target.value)}
-                   placeholder="输入密码..."
-                   className="w-full mb-4 bg-slate-100 dark:bg-black/20 border border-slate-200 dark:border-white/10 rounded-xl px-4 py-3 text-base text-center outline-none focus:ring-2 focus:ring-purple-500 transition-all text-slate-800 dark:text-white"
-                   autoFocus
-                 />
 
-                 <div className="flex gap-3">
-                    <button 
-                      onClick={() => { setPendingImportFile(null); setImportPassword(''); }}
-                      className="flex-1 py-3 rounded-xl bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300 font-bold text-sm"
-                    >
-                      取消
-                    </button>
-                    <button 
-                      onClick={executeImport}
-                      disabled={!importPassword}
-                      className="flex-1 py-3 rounded-xl bg-purple-600 text-white font-bold text-sm disabled:opacity-50"
-                    >
-                      确认导入
-                    </button>
-                 </div>
-             </div>
-         </div>
-      )}
     </div>
   );
 };

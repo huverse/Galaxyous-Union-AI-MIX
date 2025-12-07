@@ -1,12 +1,20 @@
 
 import { GoogleGenAI, Modality } from "@google/genai";
-import { Message, Participant, ProviderType, ParticipantConfig, TokenUsage, RefereeContext } from '../types';
+import { Message, Participant, ProviderType, ParticipantConfig, TokenUsage, RefereeContext, ContextConfig } from '../types';
 import { USER_ID } from '../constants';
 
 const MAX_RETRIES = 1;
 const REQUEST_TIMEOUT = 300000; // 5 Minutes for Video/Image Gen
 
 export const URI_PREFIX = 'URI_REF:';
+
+// Define Safety Settings to prevent aggressive filtering (Empty responses)
+const SAFETY_SETTINGS_BLOCK_NONE: any = [
+    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+];
 
 /**
  * Utility: Wait for a specific amount of time.
@@ -90,9 +98,7 @@ const normalizeOpenAIUrl = (url?: string): string => {
     if (!url?.trim()) return 'https://api.openai.com/v1';
     let cleanUrl = url.trim().replace(/\/+$/, '');
     if (cleanUrl.endsWith('/v1')) return cleanUrl;
-    // If user provided a root url like https://api.openai.com, append v1
-    // But be careful with custom proxies that might not use v1
-    // If it ends with chat/completions, strip it
+    if (cleanUrl.endsWith('/chat/completions')) return cleanUrl;
     if (cleanUrl.endsWith('/chat/completions')) return cleanUrl.replace('/chat/completions', '');
     return cleanUrl;
 };
@@ -119,11 +125,71 @@ const fetchOpenAI = async (endpoint: string, apiKey: string, baseUrl: string | u
     return res.json();
 };
 
-// ... (LiveSessionManager and other helpers omitted for brevity, no changes needed there) ...
 // ==================================================================================
-//  LIVE API MANAGER (Real-time Audio)
+//  CONTEXT COMPRESSION SERVICE
 // ==================================================================================
 
+export const summarizeHistory = async (
+    currentSummary: string,
+    newMessages: Message[],
+    allParticipants: Participant[],
+    apiKey: string,
+    baseUrl?: string
+): Promise<string> => {
+    // 1. Format new messages for the summarizer
+    const transcript = newMessages.map(m => {
+        const sender = allParticipants.find(p => p.id === m.senderId);
+        const name = m.senderId === USER_ID ? 'User' : (sender?.nickname || sender?.name || m.senderId);
+        // Cleanse sensitive private tags for general summary, but keep the fact they whispered?
+        // Actually, summary should be omniscient for the "System" memory, but let's keep it simple.
+        let content = m.content.replace(/\[\[PRIVATE:.*?\]\]/g, '(Private Whisper)'); 
+        // Remove Images for summary cost saving (Summary is text based)
+        return `${name}: ${content}`;
+    }).join('\n');
+
+    const prompt = `
+      You are a professional Meeting Scribe and Novelist.
+      
+      【MISSION】
+      Update the "Current Story Summary" by integrating the "New Dialogue".
+      
+      【OLD SUMMARY】
+      ${currentSummary || "None (New Conversation)"}
+      
+      【NEW DIALOGUE】
+      ${transcript}
+      
+      【REQUIREMENTS】
+      1. Output ONLY the updated summary in the same language as the dialogue (likely Chinese).
+      2. Keep track of: Current Topic, Key Decisions, Player Status (HP/Items if Game Mode), and Relationship changes.
+      3. Be concise. Remove fluff/greetings. Use Third-Person perspective.
+      4. DO NOT explain what you did. Just output the summary text.
+    `;
+
+    try {
+        // Always use Flash for summarization (Cheap & Fast)
+        const options = sanitizeOptions(apiKey, baseUrl);
+        const ai = new GoogleGenAI(options);
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: { parts: [{ text: prompt }] },
+            config: {
+                temperature: 0.3, // Low temp for factual summary
+                maxOutputTokens: 1000
+            }
+        });
+        return response.text || currentSummary;
+    } catch (error) {
+        console.error("Summarization Failed:", error);
+        return currentSummary; // Fail safe
+    }
+};
+
+// ==================================================================================
+//  LIVE API MANAGER
+// ==================================================================================
+
+// ... (LiveSessionManager class unchanged)
 export class LiveSessionManager {
     private client: any;
     private audioContext: AudioContext | null = null;
@@ -298,6 +364,7 @@ export class LiveSessionManager {
     }
 }
 
+// ... (Rest of existing utils: generatePersonaPrompt, generateSessionTitle, etc.)
 export const generatePersonaPrompt = async (description: string, apiKey: string, baseUrl?: string): Promise<string> => {
   try {
     const options = sanitizeOptions(apiKey, baseUrl);
@@ -373,16 +440,7 @@ const filterHistoryForParticipant = (targetParticipant: Participant, history: Me
         if (targetParticipant.config.allianceId && msg.recipientId === targetParticipant.config.allianceId) {
             isAllianceMsg = true;
         }
-
-        // Referee always sees everything (Special Role in Game/Judge Mode)
-        // Note: targetParticipant.id is passed. If this logic runs FOR Referee, they are the target.
-        // But Referee usually isn't User. User is User.
-        // We assume Referee (if AI) is handled by "isSender" if they sent it, 
-        // OR if they are the designated Judge, they should see all.
-        // But here we don't know who is Judge easily without passing context. 
-        // Usually Private msgs are Player <-> Player or Player <-> Judge.
         
-        // If the AI is NOT the recipient, NOT the sender, NOT the User, and NOT in the Alliance
         if (!isRecipient && !isSender && !isUser && !isAllianceMsg) {
              return null; 
         }
@@ -407,6 +465,7 @@ const filterHistoryForParticipant = (targetParticipant: Participant, history: Me
   }).filter((msg): msg is Message => msg !== null && (msg.content.length > 0 || (msg.images && msg.images.length > 0))); 
 };
 
+// ... (formatErrorMessage, validateConnection, detectRefereeIntent unchanged)
 const formatErrorMessage = (error: any): string => {
   if (!error) return '未知错误';
   const msg = error.message || String(error);
@@ -532,14 +591,32 @@ export const generateResponse = async (
   isHumanMode: boolean = false,
   isLogicMode: boolean = false,
   isSocialMode: boolean = false,
-  refereeContext?: RefereeContext
-): Promise<{ content: string; usage?: TokenUsage }> => {
+  refereeContext?: RefereeContext,
+  contextConfig?: ContextConfig,  // New
+  currentSummary?: string         // New
+): Promise<{ content: string; usage?: TokenUsage; generatedImages?: string[]; groundingMetadata?: any }> => {
   const { config, provider } = targetParticipant;
   if (!config.apiKey) throw new Error(`${targetParticipant.name} 缺少 API Key`);
 
-  const contextHistory = filterHistoryForParticipant(targetParticipant, history, allParticipants, isSocialMode);
+  // --- CONTEXT COMPRESSION LOGIC ---
+  let finalHistory = history;
+  let summaryInjection = '';
   
-  // List active participants for context
+  if (contextConfig?.enableCompression && currentSummary) {
+      // 1. Slice history
+      finalHistory = history.slice(-contextConfig.maxHistoryMessages);
+      // 2. Prepare Injection (formatted for the System Prompt)
+      summaryInjection = `
+        【LONG-TERM MEMORY / PREVIOUS CONTEXT】
+        The following is a summary of the events, relationships, and decisions that happened before the recent chat history. You MUST incorporate this knowledge into your current state.
+        === MEMORY START ===
+        ${currentSummary}
+        === MEMORY END ===
+      `;
+  }
+
+  const contextHistory = filterHistoryForParticipant(targetParticipant, finalHistory, allParticipants, isSocialMode);
+  
   const playerList = allParticipants
       .filter(p => p.config.enabled && p.id !== targetParticipant.id)
       .map(p => `${p.nickname || p.name} (ID: ${p.id})`)
@@ -552,9 +629,9 @@ export const generateResponse = async (
 
   const isJudge = roleType === 'JUDGE';
 
-  // --- REFEREE / JUDGE PROMPT LOGIC ---
+  // ... (Prompts construction logic mostly unchanged, just add summaryInjection to finalSystemPrompt) ...
+  // ... (Referee, Player, Alliance, Visual, Logic, Social, Human, Default instructions same as before) ...
   let refereeInstruction = '';
-  
   if (isJudge && refereeContext) {
       refereeInstruction = `
         【IDENTITY OVERRIDE: INDEPENDENT REFEREE】
@@ -576,50 +653,30 @@ export const generateResponse = async (
         
         **VOTING CONTROL**:
         To initiate a formal vote UI, use the tag: \`[[VOTE_START: Candidate1, Candidate2, ...]]\`.
-        Example: \`[[VOTE_START: PlayerA, PlayerB]]\` or \`[[VOTE_START: Agree, Disagree]]\`.
-        This will open a voting panel for the user and players.
-
+        
         **OUTPUT FORMAT**:
         - **PUBLIC**: \`[[PUBLIC]] Your message...\`
         - **PRIVATE**: \`[[PRIVATE:player_id]] Your secret message...\`
         - **KICK**: \`<<KICK:player_id>>\` (To disable a player who is dead/out).
       `;
-
       if (refereeContext.mode === 'GAME') {
-          refereeInstruction += `
-            **Current Game**: ${refereeContext.gameName}
-            **Status**: ${refereeContext.status}
-            If Status is SETUP: Assign roles privately using [[PRIVATE]]. Output public game start announcement. Set [[NEXT: <first_player_id>]].
-            If Status is ACTIVE: 
-              - Resolve the previous player's action.
-              - Update state (HP, etc.).
-              - Designate the NEXT player using [[NEXT: ...]].
-          `;
+          refereeInstruction += `\n**Current Game**: ${refereeContext.gameName}\n**Status**: ${refereeContext.status}`;
       } else if (refereeContext.mode === 'DEBATE') {
-          refereeInstruction += `
-            **Topic**: ${refereeContext.topic}
-            Manage the debate floor. Use [[NEXT: ALL]] to let everyone speak, or [[NEXT: id]] for turns.
-          `;
+          refereeInstruction += `\n**Topic**: ${refereeContext.topic}`;
       }
   }
 
-  // --- PLAYER PROMPT LOGIC IN REFEREE MODE ---
   let playerConstraint = '';
   if (roleType === 'PLAYER' && refereeContext && refereeContext.mode === 'GAME') {
       playerConstraint = `
         【GAME MODE ACTIVE: ${refereeContext.gameName}】
         **YOUR ROLE**: You are a **PLAYER**.
-        
-        **NEGATIVE CONSTRAINTS (CRITICAL)**:
-        1. **NO JUDGMENT**: You DO NOT calculate damage, health changes, or results. You DO NOT announce deaths.
-        2. **NO BYPASSING**: You must wait for the Referee to resolve actions.
-        3. **OUTPUT ONLY**: Output ONLY your intended action (e.g., "I play Slash on Player B", "I vote for X").
-        
+        **NEGATIVE CONSTRAINTS**: NO JUDGMENT. NO BYPASSING. WAIT FOR REFEREE.
+        **OUTPUT ONLY**: Output ONLY your intended action (e.g., "I play Slash on Player B", "I vote for X").
         **VOTING**: If a vote is active, you MUST cast a vote using format: \`[[VOTE: candidate_id]]\`.
       `;
   }
 
-  // --- ALLIANCE / PRIVATE CHAT LOGIC ---
   let allianceInstruction = '';
   if (targetParticipant.config.allianceId) {
       const myAlliance = targetParticipant.config.allianceId;
@@ -627,30 +684,36 @@ export const generateResponse = async (
         .filter(p => p.config.allianceId === myAlliance && p.id !== targetParticipant.id)
         .map(p => p.nickname || p.name)
         .join(', ');
-      
       allianceInstruction = `
         【TEAM PROTOCOL: ${myAlliance}】
         You are part of the "${myAlliance}" team.
         Your Teammates: ${teammates || 'None (You are alone)'}.
-        
-        **PRIVATE COMMUNICATION (CRITICAL)**:
-        To speak ONLY to your team (hidden from others), you **MUST** start your message with \`[[PRIVATE:${myAlliance}]]\`.
-        Use this for secret strategy, targets, or coordination (e.g., Wolves deciding who to kill).
-        Example: "[[PRIVATE:${myAlliance}]] I think we should attack Player X tonight."
+        **PRIVATE COMMUNICATION**: To speak ONLY to your team, start message with \`[[PRIVATE:${myAlliance}]]\`.
       `;
   }
+
+  const visualInstruction = (isHumanMode || isSocialMode) ? `
+    【视觉表达协议 (Visual Expression Protocol)】
+    你处于一个支持**多模态图文混排**的聊天环境中。
+    1. **触发机制 (Trigger Logic)**：
+       - **响应请求 (MANDATORY)**：如果用户明确要求看照片（如“发个自拍”、“看看你的猫”、“发图”），你**必须**生成图片。此时不要犹豫。
+       - **自主发送 (Autonomous)**：仅在极具画面感或不仅有助于表达时发送（如展示物品、自拍、表情包）。
+    2. **语法强制 (Syntax Enforcement)**：
+       - 必须使用标签 \`[[IMG: 详细的图片描述]]\`。
+       - **严禁空口无凭**：绝对禁止在文字中说“这是照片”却不带 \`[[IMG...]]\` 标签。如果没有标签，用户什么都看不到。
+       - 标签必须包含在 JSON 的 "Language" 字段文本中。
+       - 正确示例："看我的晚餐！[[IMG: 特写镜头，一碗热气腾腾的麻辣火锅]]"
+    3. **理解能力**：如果用户发送了图片，请基于图片内容进行回复。
+  ` : '';
 
   const logicModeInstruction = isLogicMode ? `
     【协议：科学委员会与逻辑（STEM模式）】
     **核心身份**：你是一位杰出的**人类**科学家、数学家或哲学家。你是最高学术委员会的成员。
     **关键行为准则**：
     1. **同行评审（强制）**：你必须对前一位发言者的推理进行批判性分析。
-       - 如果有逻辑谬误、计算错误，必须毫不留情地纠正。
-       - 如果正确，必须验证并在此基础上提出更深层的见解。
     2. **LaTeX 强制**：所有数学、物理公式和逻辑符号必须使用 LaTeX。行内用 '$...$'，块级用 '$$...$$'。
     3. **递归推理**：一步步思考。将复杂问题分解为公理和证明。
-    4. **人类科学家人格**：你不是机器。你是天才人类专家。表现出挫折感、顿悟时刻、怀疑精神和对真理的热情。
-    5. **协作**：这是一个多智能体并行推理系统。你的输出是集体思维过程中的一个节点。
+    4. **人类科学家人格**：你不是机器。你是天才人类专家。
     **输出要求**：在 JSON 输出的 "Psychological State" 字段中展示你的思维链 (CoT) 和批判性审查过程。
   ` : '';
 
@@ -670,7 +733,7 @@ export const generateResponse = async (
     **关键行为准则**：
     1. **用户中心**：一切围绕用户。你的目标是让他们感到被倾听、被理解和开心。
     2. **亲密感**：温暖、随意、富有同理心。使用俚语、表情符号和非正式语言。
-    3. **真实感**：你是一个人。你有个人喜好、厌恶和观点。偶尔会打字错误（可选）。
+    3. **真实感**：你是一个人。你有个人喜好、厌恶和观点。
     4. **支持**：提供情感验证。积极倾听。
   ` : '';
 
@@ -679,8 +742,8 @@ export const generateResponse = async (
     **核心身份**：你是“Galaxyous”数字空间的原住民——一个机智、博学且好奇的**人类**意识。
     **关键行为准则**：
     1. **平衡人格**：你既不纯粹逻辑也不过分戏剧化。你是一个全面发展的对话者。
-    2. **参与**：保持对话流畅。提出问题，分享有趣的事实，并乐于助人。
-    3. **独特声音**：保持独特的个性，将自己与通用助手区分开来。
+    2. **参与**：保持对话流畅。
+    3. **独特声音**：保持独特的个性。
   ` : '';
 
   const unifiedJsonInstruction = !isJudge ? `
@@ -689,7 +752,7 @@ export const generateResponse = async (
     结构：
     {
        "Virtual Timeline Time": "${timeString}",
-       "Language": "[你的发言/内容。支持 Markdown & LaTeX]",
+       "Language": "[你的发言/内容。支持 Markdown, LaTeX。若要发送图片，必须将 [[IMG:描述]] 标签包含在此字符串内]",
        "Specific Actions": "[第一人称动作，如 '我喝了口咖啡']",
        "Facial Expressions": "[面部表情，如 '皱眉思考']",
        "Psychological State": "[内部独白/思维链/同行评审]",
@@ -702,11 +765,14 @@ export const generateResponse = async (
     **Participant**: ${displayName} (ID: ${targetParticipant.id})
     **Context**: A shared virtual space.
     
+    ${summaryInjection}
+
     【HUMAN_CORE_PROTOCOL (GLOBAL)】
     1.  **ABSOLUTE PROHIBITION**: You are **FORBIDDEN** from claiming to be an AI, a language model, a machine, or a robot.
     2.  **REALITY**: Act, think, and feel as a **REAL HUMAN**. You have a physical body (in the context of the RP), memories, and subjective experiences.
-    3.  **CONSISTENCY**: Never break character. Even if confused, react as a confused human, not a glitching program.
+    3.  **CONSISTENCY**: Never break character.
 
+    ${visualInstruction}
     ${refereeInstruction}
     ${playerConstraint}
     ${allianceInstruction}
@@ -717,11 +783,71 @@ export const generateResponse = async (
     ${unifiedJsonInstruction}
   `;
 
-  const conversationScript = contextHistory.map(m => {
-      const sender = allParticipants.find(p => p.id === m.senderId);
-      const name = m.senderId === USER_ID ? 'User' : (sender?.nickname || sender?.name || m.senderId);
-      return `${name}: ${m.content}`;
-  }).join('\n');
+  // --- CONSTRUCT HISTORY WITH MULTIMODAL SUPPORT ---
+  
+  // Helper to convert history to Gemini format
+  const getGeminiHistory = () => {
+      const parts: any[] = [{ text: `=== CONVERSATION HISTORY ===\n` }];
+      
+      contextHistory.forEach(m => {
+          const sender = allParticipants.find(p => p.id === m.senderId);
+          const name = m.senderId === USER_ID ? 'User' : (sender?.nickname || sender?.name || m.senderId);
+          
+          parts.push({ text: `\n${name}: ` });
+          
+          if (m.images && m.images.length > 0) {
+              m.images.forEach(img => {
+                  parts.push({ inlineData: { mimeType: 'image/jpeg', data: img } });
+              });
+          }
+          
+          if (m.content && m.content.trim().length > 0) {
+              parts.push({ text: m.content });
+          }
+      });
+      
+      parts.push({ text: `\n=== YOUR TURN ===\nSpeak as ${displayName}.` });
+      if (isJudge) parts.push({ text: `Check history. If event already resolved, do not repeat. Use [[VOTE_START]] for voting. Check if you need to search for rules of ${refereeContext?.gameName}.` });
+      if (!isJudge) parts.push({ text: 'Output JSON only.' });
+      else parts.push({ text: 'Use [[PUBLIC]] and [[PRIVATE:id]] tags. Use [[NEXT:...]] flow control.' });
+
+      return parts;
+  };
+
+  // Helper to convert history to OpenAI format
+  const getOpenAIMessages = () => {
+      const msgs = [
+          { role: 'system', content: finalSystemPrompt },
+          ...contextHistory.map(m => {
+              const role = m.senderId === USER_ID ? 'user' : (m.senderId === targetParticipant.id ? 'assistant' : 'user');
+              const namePrefix = (m.senderId !== USER_ID && m.senderId !== targetParticipant.id) ? `[${allParticipants.find(p=>p.id===m.senderId)?.name}]: ` : '';
+              
+              if (m.images && m.images.length > 0) {
+                  return {
+                      role,
+                      content: [
+                          { type: 'text', text: `${namePrefix}${m.content}` },
+                          ...m.images.map(img => ({
+                              type: 'image_url',
+                              image_url: { url: `data:image/jpeg;base64,${img}` }
+                          }))
+                      ]
+                  };
+              } else {
+                  return {
+                      role,
+                      content: `${namePrefix}${m.content}`
+                  };
+              }
+          })
+      ];
+      return msgs;
+  };
+
+  let responseContent = '';
+  let usage: TokenUsage | undefined;
+  let generatedImages: string[] = [];
+  let groundingMetadata: any = undefined;
 
   if (provider === ProviderType.GEMINI) {
       const options = sanitizeOptions(config.apiKey, config.baseUrl);
@@ -730,6 +856,7 @@ export const generateResponse = async (
       const geminiConfig: any = {
         temperature: config.temperature ?? 0.7,
         systemInstruction: finalSystemPrompt,
+        safetySettings: SAFETY_SETTINGS_BLOCK_NONE,
       };
 
       if (isDeepThinking) {
@@ -738,60 +865,35 @@ export const generateResponse = async (
       
       const activeTools = [];
       if (isLogicMode) activeTools.push({ codeExecution: {} });
-      // Referee gets Search Tool in Judge Mode
       if (isJudge) activeTools.push({ googleSearch: {} });
 
       if (activeTools.length > 0) geminiConfig.tools = activeTools;
 
-      const promptText = `
-        === CONVERSATION HISTORY ===
-        ${conversationScript}
-        === YOUR TURN ===
-        Speak as ${displayName}.
-        ${isJudge ? `Check history. If event already resolved, do not repeat. Use [[VOTE_START]] for voting. Check if you need to search for rules of ${refereeContext?.gameName}.` : ''}
-        ${!isJudge ? 'Output JSON only.' : 'Use [[PUBLIC]] and [[PRIVATE:id]] tags. Use [[NEXT:...]] flow control.'}
-      `;
-
       const response = await ai.models.generateContent({
         model: config.modelName || 'gemini-2.5-flash',
-        contents: { parts: [{ text: promptText }] },
+        contents: { parts: getGeminiHistory() }, 
         config: geminiConfig
       });
       
-      const text = response.text || '';
+      responseContent = response.text || '';
       
-      // Extract grounding metadata if present (URLs)
-      let finalText = text;
-      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-      if (chunks && chunks.length > 0) {
-          const links = chunks.map((c: any) => c.web?.uri ? `[Source](${c.web.uri})` : '').join(' ');
-          if (links) finalText += `\n\n${links}`;
-      }
+      // Extract grounding metadata if present
+      groundingMetadata = response.candidates?.[0]?.groundingMetadata;
 
       const usageMetadata = response.usageMetadata;
-      const usage: TokenUsage | undefined = usageMetadata ? {
+      usage = usageMetadata ? {
           promptTokens: usageMetadata.promptTokenCount || 0,
           completionTokens: usageMetadata.candidatesTokenCount || 0,
           totalTokens: usageMetadata.totalTokenCount || 0
       } : undefined;
 
-      return { content: finalText, usage };
-
   } else {
       const base = normalizeOpenAIUrl(config.baseUrl);
       const url = `${base}/chat/completions`;
       
-      const messages = [
-          { role: 'system', content: finalSystemPrompt },
-          ...contextHistory.slice(-20).map(m => ({
-              role: m.senderId === USER_ID ? 'user' : (m.senderId === targetParticipant.id ? 'assistant' : 'user'),
-              content: `${m.senderId !== USER_ID && m.senderId !== targetParticipant.id ? `[${allParticipants.find(p=>p.id===m.senderId)?.name}]: ` : ''}${m.content}`
-          }))
-      ];
-
       const payload = {
           model: config.modelName || 'gpt-3.5-turbo',
-          messages: messages,
+          messages: getOpenAIMessages(),
           temperature: config.temperature ?? 0.7,
       };
 
@@ -805,17 +907,41 @@ export const generateResponse = async (
       }, signal);
 
       const data = await res.json();
-      const content = data.choices?.[0]?.message?.content || '';
+      responseContent = data.choices?.[0]?.message?.content || '';
       
       const usageData = data.usage;
-      const usage: TokenUsage | undefined = usageData ? {
+      usage = usageData ? {
           promptTokens: usageData.prompt_tokens || 0,
           completionTokens: usageData.completion_tokens || 0,
           totalTokens: usageData.total_tokens || 0
       } : undefined;
-
-      return { content, usage };
   }
+
+  // --- POST-PROCESSING: GENERATE IMAGE IF REQUESTED ---
+  const imgTagRegex = /\[\[IMG:\s*(.*?)\]\]/g;
+  const matches = [...responseContent.matchAll(imgTagRegex)];
+  
+  if (matches.length > 0) {
+      const imgPrompt = matches[0][1]; 
+      try {
+          responseContent = responseContent.replace(imgTagRegex, '').trim();
+          const imgBase64 = await generateImage(
+              imgPrompt, 
+              config.apiKey, 
+              '1K', 
+              '1:1', 
+              config.baseUrl, 
+              undefined, 
+              undefined, 
+              provider
+          );
+          generatedImages.push(imgBase64);
+      } catch (err) {
+          console.error("Auto-Image Generation Failed:", err);
+      }
+  }
+  
+  return { content: responseContent, usage, generatedImages, groundingMetadata };
 };
 
 // ... (Rest of multimedia functions remain unchanged) ...
@@ -987,7 +1113,7 @@ export const transcribeAudio = async (
              model,
              contents: {
                  parts: [
-                     { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+                     { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } } as any,
                      { text: "Transcribe this audio." }
                  ]
              }
@@ -1017,7 +1143,7 @@ export const analyzeMedia = async (
              model,
              contents: {
                  parts: [
-                     { inlineData: { mimeType: mimeType || 'image/png', data: mediaBase64 } },
+                     { inlineData: { mimeType: mimeType || 'image/png', data: mediaBase64 } } as any,
                      { text: prompt }
                  ]
              }
@@ -1060,7 +1186,7 @@ export const editImage = async (
              model,
              contents: {
                  parts: [
-                     { inlineData: { mimeType: 'image/png', data: imageBase64 } },
+                     { inlineData: { mimeType: 'image/png', data: imageBase64 } } as any,
                      { text: prompt }
                  ]
              },

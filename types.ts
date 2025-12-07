@@ -55,6 +55,7 @@ export interface Message {
   images?: string[]; // Base64 strings
   videos?: string[]; // URL or Base64
   audios?: string[]; // Base64 (TTS result)
+  groundingMetadata?: any; // New: Store Google Search grounding data
   timestamp: number;
   isError?: boolean;
 }
@@ -78,6 +79,11 @@ export interface RefereeContext {
   topic?: string;
   status: 'IDLE' | 'SETUP' | 'ACTIVE';
   lastDecision?: string;
+}
+
+export interface ContextConfig {
+  enableCompression: boolean; 
+  maxHistoryMessages: number; // Sliding window size (e.g. 20)
 }
 
 export interface Session {
@@ -105,6 +111,11 @@ export interface Session {
   // New Referee System
   refereeContext?: RefereeContext;
   votingState?: VoteState;
+
+  // Context Compression / Memory
+  contextConfig: ContextConfig;
+  summary: string; // Long-term memory summary
+  lastSummarizedMessageId: string | null; // Checkpoint
 
   tokenUsage: TokenUsage; // Track usage per session
 }

@@ -1,7 +1,7 @@
 
 import React, { useState, useRef } from 'react';
 import { Participant, ProviderType, GameMode } from '../types';
-import { X, Save, CheckCircle2, AlertCircle, Cpu, Key, Link2, MessageSquare, Users2, Gavel, BookOpen, MessageCircle, Plus, Trash2, Edit2, Upload, Download, ShieldCheck, ThermometerSun, UserCircle2, Zap, Wifi, Wand2, ImagePlus, BarChart2, Hash, RotateCcw } from 'lucide-react';
+import { X, Save, CheckCircle2, AlertCircle, Cpu, Key, Link2, MessageSquare, Users2, Gavel, BookOpen, MessageCircle, Plus, Trash2, Edit2, Upload, Download, ShieldCheck, ThermometerSun, UserCircle2, Zap, Wifi, Wand2, ImagePlus, BarChart2, Hash, RotateCcw, BrainCircuit, Sparkles } from 'lucide-react';
 import { validateConnection, generatePersonaPrompt } from '../services/aiService';
 
 interface SettingsModalProps {
@@ -19,6 +19,10 @@ interface SettingsModalProps {
   onImportConfig: () => void;
   onResetTokenUsage: (id: string) => void;
   onResetAllTokenUsage: () => void;
+  
+  // New props for context compression
+  contextConfig: { enableCompression: boolean; maxHistoryMessages: number; };
+  onUpdateContextConfig: (config: { enableCompression: boolean; maxHistoryMessages: number; }) => void;
 }
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ 
@@ -26,11 +30,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   gameMode, onUpdateGameMode, specialRoleId, onUpdateSpecialRole,
   onAddCustomParticipant, onRemoveCustomParticipant,
   onExportConfig, onImportConfig,
-  onResetTokenUsage, onResetAllTokenUsage
+  onResetTokenUsage, onResetAllTokenUsage,
+  contextConfig, onUpdateContextConfig
 }) => {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean, msg: string }>>({});
   const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const [showCompressionConfirm, setShowCompressionConfirm] = useState(false);
   
   // Ref for hidden file input to handle avatar uploads
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -118,6 +124,19 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       };
   }, { total: 0, prompt: 0, completion: 0 });
 
+  const toggleCompression = (val: boolean) => {
+      if (val) {
+          setShowCompressionConfirm(true);
+      } else {
+          onUpdateContextConfig({ ...contextConfig, enableCompression: false });
+      }
+  };
+
+  const confirmCompression = () => {
+      onUpdateContextConfig({ ...contextConfig, enableCompression: true });
+      setShowCompressionConfirm(false);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
       <input 
@@ -167,11 +186,59 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                <Upload size={18} className="text-purple-500" />
                导入配置
              </button>
-             <div className="w-full sm:w-auto px-4 py-3 bg-yellow-50 dark:bg-yellow-900/10 border border-yellow-200 dark:border-yellow-800 rounded-xl text-xs text-yellow-700 dark:text-yellow-400 flex items-center gap-2 leading-relaxed">
-                <ShieldCheck size={16} className="shrink-0" />
-                <span>配置使用密码加密，请妥善保管密码。</span>
-             </div>
           </div>
+
+          {/* --- CONTEXT COMPRESSION SECTION (NEW) --- */}
+          <div className="mb-8 bg-white dark:bg-[#1e1e1e] p-5 sm:p-6 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-sm relative overflow-hidden">
+             <div className="absolute top-0 right-0 p-10 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 blur-3xl rounded-full pointer-events-none"></div>
+             
+             <div className="flex justify-between items-start mb-4 relative z-10">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+                    <BrainCircuit className="text-indigo-500" size={20}/> 记忆压缩 (Context Compression)
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-lg leading-relaxed">
+                     当对话过长时，自动将早期记忆压缩为摘要，大幅降低 Token 消耗并加速响应。建议在长对话或跑团时开启。
+                  </p>
+                </div>
+                
+                <label className="relative inline-flex items-center cursor-pointer ml-4">
+                  <input 
+                    type="checkbox" 
+                    className="sr-only peer"
+                    checked={contextConfig.enableCompression}
+                    onChange={(e) => toggleCompression(e.target.checked)}
+                  />
+                  <div className="w-14 h-8 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-7 after:w-7 after:transition-all dark:border-gray-600 peer-checked:bg-indigo-600 shadow-inner"></div>
+                </label>
+             </div>
+
+             {contextConfig.enableCompression && (
+                <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 animate-slide-up">
+                    <div className="flex flex-col sm:flex-row gap-6 items-center">
+                        <div className="flex-1 w-full">
+                            <label className="flex justify-between text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
+                                <span>保留最近消息数 (Sliding Window)</span>
+                                <span className="bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300 px-2 rounded">{contextConfig.maxHistoryMessages} 条</span>
+                            </label>
+                            <input 
+                              type="range" 
+                              min="10" 
+                              max="100" 
+                              step="5"
+                              value={contextConfig.maxHistoryMessages}
+                              onChange={(e) => onUpdateContextConfig({ ...contextConfig, maxHistoryMessages: parseInt(e.target.value) })}
+                              className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                            />
+                            <p className="text-[10px] text-slate-400 mt-2">
+                               系统将始终保留最近 {contextConfig.maxHistoryMessages} 条消息的原始内容，更早的消息将被压缩进“长期记忆摘要”中。
+                            </p>
+                        </div>
+                    </div>
+                </div>
+             )}
+          </div>
+
 
           {/* --- Token Statistics Dashboard --- */}
           <div className="mb-8 bg-white dark:bg-[#1e1e1e] p-5 sm:p-6 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-sm">
@@ -241,7 +308,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 
           <div className="h-px w-full bg-slate-200 dark:bg-slate-700 mb-8"></div>
 
-          {/* --- Game Mode Selection Section --- */}
+          {/* ... Game Mode Selection Section (Unchanged) ... */}
           <div className="mb-8 bg-white dark:bg-[#1e1e1e] p-5 sm:p-6 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-sm">
              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-200 mb-4 flex items-center gap-2">
                <Cpu className="text-blue-500" size={20}/> 模式与角色
@@ -309,7 +376,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 
           <div className="h-px w-full bg-slate-200 dark:bg-slate-700 mb-8"></div>
 
-          {/* --- Participants List --- */}
+          {/* ... Participants List (Unchanged) ... */}
           <div className="flex items-center justify-between mb-6">
              <h3 className="text-lg font-bold text-slate-700 dark:text-slate-300">AI 成员列表</h3>
              <button 
@@ -616,6 +683,46 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* CONFIRMATION MODAL FOR COMPRESSION */}
+      {showCompressionConfirm && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+             <div className="bg-white dark:bg-[#1c1c1e] w-full max-w-sm rounded-3xl p-6 shadow-2xl animate-slide-up border border-indigo-500/30">
+                 <div className="flex flex-col items-center text-center mb-6">
+                     <div className="w-16 h-16 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-600 mb-4 animate-pulse">
+                         <Sparkles size={32} />
+                     </div>
+                     <h3 className="text-xl font-bold text-slate-900 dark:text-white">启用记忆压缩？</h3>
+                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">
+                        Context Compression System
+                     </p>
+                 </div>
+                 
+                 <div className="space-y-4 mb-6">
+                     <div className="p-3 bg-green-50 dark:bg-green-900/10 rounded-xl border border-green-100 dark:border-green-800/30 text-left">
+                         <h4 className="text-xs font-bold text-green-700 dark:text-green-400 mb-1 flex items-center gap-1">✅ 优势 (Pros)</h4>
+                         <ul className="text-xs text-green-800 dark:text-green-300 list-disc pl-4 space-y-0.5">
+                             <li>大幅降低 Token 费用。</li>
+                             <li>支持无限轮次的长对话。</li>
+                             <li>加快 AI 响应速度。</li>
+                         </ul>
+                     </div>
+                     <div className="p-3 bg-amber-50 dark:bg-amber-900/10 rounded-xl border border-amber-100 dark:border-amber-800/30 text-left">
+                         <h4 className="text-xs font-bold text-amber-700 dark:text-amber-400 mb-1 flex items-center gap-1">⚠️ 劣势 (Cons)</h4>
+                         <ul className="text-xs text-amber-800 dark:text-amber-300 list-disc pl-4 space-y-0.5">
+                             <li>可能会丢失微小的对话细节。</li>
+                             <li>AI 只能记住大意，而非原话。</li>
+                         </ul>
+                     </div>
+                 </div>
+
+                 <div className="flex gap-3">
+                     <button onClick={() => setShowCompressionConfirm(false)} className="flex-1 py-3 rounded-xl bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300 font-bold text-sm">取消</button>
+                     <button onClick={confirmCompression} className="flex-1 py-3 rounded-xl bg-indigo-600 text-white font-bold text-sm shadow-lg shadow-indigo-500/30">确认启用</button>
+                 </div>
+             </div>
+          </div>
+      )}
     </div>
   );
 };
